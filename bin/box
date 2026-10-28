@@ -173,6 +173,7 @@ Host orb
   # The invite can lag behind the PUT, so retry the accept.
   run_in "$sandbox" exec "$name" bash -s <<EOF
 set -euo pipefail
+[ -n "\${GH_TOKEN:-}" ] || { echo "box: GH_TOKEN missing in the box" >&2; exit 1; }
 if [ "$accept" = 1 ]; then
   for _ in \$(seq 30); do
     id="\$(gh api user/repository_invitations --paginate --jq 'first(.[] | select(.repository.full_name == "$owner/$name") | .id) // empty')"
@@ -181,6 +182,7 @@ if [ "$accept" = 1 ]; then
   done
   [ -n "\$id" ] || { echo "box: no invitation to $owner/$name found" >&2; exit 1; }
   gh api -X PATCH "user/repository_invitations/\$id" >/dev/null
+  [ "\$(gh api repos/$owner/$name --jq .permissions.push)" = true ] || { echo "box: agent has no push access to $owner/$name" >&2; exit 1; }
 fi
 gh repo clone $owner/$name ~/$name
 cd ~/$name
