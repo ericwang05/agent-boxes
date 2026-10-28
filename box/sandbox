@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# sandbox - throwaway OrbStack Debian machines, cloned from one provisioned base.
+set -euo pipefail
+
+BASE=box-base
+HERE=$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && pwd)
+TOKEN_FILE="${AGENT_TOKEN_FILE:-$HOME/agent-boxes/.agent-token}"
+SANDBOX_DISTRO="${SANDBOX_DISTRO:-debian:trixie}"
+SANDBOX_USER="${USER:-$(id -un)}"
+
+usage() {
+  cat <<'USAGE'
+Usage: sandbox <command>
+  base                Build (or rebuild) the base machine from setup.sh
+  new <name>          Clone base into a hardened machine, no host mount
+  exec <name> '<cmd>' Run a login-shell command in a machine
+  rm <name>           Delete a machine
+  ls                  List machines
+USAGE
+}
+
+exists() { orb list 2>/dev/null | awk -v n="$1" '$1 == n { f=1 } END { exit !f }'; }
+
+need_name() {
+  case "${1:-}" in
+    ''|*/*|.|..|-*) echo "error: invalid machine name '${1:-}'" >&2; exit 1 ;;
+    "$BASE") echo "error: '$BASE' is managed by 'sandbox base'" >&2; exit 1 ;;
+  esac
+}
+
+# Root-run steps use `orb -u root`, not sudo: harden removes the sudo grant.
+harden() {
+  # OrbStack grants passwordless sudo via /etc/sudoers.d/orbstack; empty it
+  # so the agent cannot undo the nftables LAN block.
+  orb -m "$1" -u root bash -c '
+    : > /etc/sudoers.d/orbstack
+    if runuser -u '"$SANDBOX_USER"' -- sudo -n true 2>/dev/null; then
+      echo "FATAL: sudo still works after strip" >&2; exit 1
+    fi'
+}
+
+cmd="${1:-help}"; shift || true
+case "$cmd" in
+  base)
+    [ -r "$TOKEN_FILE" ] || { echo "error: no agent token at $TOKEN_FILE" >&2; exit 1; }
+    if exists "$BASE"; then
+      read -r -p "Rebuild '$BASE' from scratch? [y/N] " ans
+      [ "$ans" = y ] || exit 0
+      orb delete -f "$BASE"
+    fi
+    orb create --isolated --isolate-network "$SANDBOX_DISTRO" "$BASE"
+    orb -m "$BASE" sudo env SETUP_USER="$SANDBOX_USER" AGENT_TOKEN="$(cat "$TOKEN_FILE")" \
+      bash -s < "$HERE/setup.sh"
+    orb stop "$BASE"
+    cat <<STEPS
+
+Base ready. One-time steps (done once, inside the base, so every clone has them):
+  orb start $BASE && orb -m $BASE
+  claude auth login
+  claude            # then run: /pstack:setup-pstack
+  exit && orb stop $BASE
+
+Then: $0 new <name>
+STEPS
+    ;;
+  new)
+    name="${1:-}"; need_name "$name"
+    exists "$BASE" || { echo "error: no base - run: $0 base" >&2; exit 1; }
+    exists "$name" && { echo "error: '$name' already exists" >&2; exit 1; }
+    trap 'orb delete -f "$name" >/dev/null 2>&1 || true; echo "error: creation failed, cleaned up" >&2' ERR
+    orb clone "$BASE" "$name"
+    orb config set "machine.$name.isolated" true
+    orb config set "machine.$name.isolate_network" true
+    orb start "$name"
+    harden "$name"
+    trap - ERR
+    echo "ready: $0 exec $name '<cmd>'"
+    ;;
+  exec)
+    name="${1:-}"; need_name "$name"
+    exists "$name" || { echo "error: no machine '$name'" >&2; exit 1; }
+    [ -n "${2:-}" ] || { usage >&2; exit 1; }
+    exec orb -m "$name" bash -lc "$2"
+    ;;
+  rm)
+    name="${1:-}"; need_name "$name"
+    exists "$name" || { echo "error: no machine '$name'" >&2; exit 1; }
+    orb delete -f "$name"
+    ;;
+  ls) orb list ;;
+  *) usage ;;
+esac
