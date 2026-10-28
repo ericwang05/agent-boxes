@@ -120,33 +120,48 @@ FW
 }
 
 # Fail closed. box-base is the target (started for the test, stopped again if it was not running),
-# with a listener inside it so a failed TCP connect proves the rules, not a closed port.
+# with listeners inside it so a failed TCP connect proves the rules, not a closed port.
 check_isolation() {
-  local base_up=false ip ip6 reached="" web=true
+  local base_up=false ip ip6 reached="" web=true ok=false cmd4 cmd6
+  local port4=47391 port6=47392
+  cmd4="nc -lk 0.0.0.0 $port4"; cmd6="nc -6 -lk :: $port6"
   orb -m "$1" bash -c 'command -v ping nc curl >/dev/null' \
     || { echo "error: '$1' lacks ping, nc or curl" >&2; return 1; }
   running "$BASE" && base_up=true
   $base_up || orb start "$BASE"
+  # one place to tear down: listeners are killed on every exit path, then the base is stopped if we started it
+  stop_listeners() {
+    orb -m "$BASE" -u root bash -c 'kill $(cat /tmp/box-nc.pids 2>/dev/null) 2>/dev/null; rm -f /tmp/box-nc.pids' || true
+    $base_up || orb stop "$BASE"
+  }
   ip="$(orb -m "$BASE" hostname -I | awk '{print $1}')"
   ip6="$(orb -m "$BASE" hostname -I | tr ' ' '\n' | grep ':' | grep -vi '^fe80' | head -1 || true)"
-  orb -m "$BASE" -u root bash -c 'setsid nohup nc -lk 4444 >/dev/null 2>&1 < /dev/null &'
-  sleep 1
-  if [ -z "$ip" ] || ! orb -m "$BASE" bash -c 'nc -z -w 2 127.0.0.1 4444'; then
-    $base_up || orb stop "$BASE"
-    echo "error: isolation test setup failed (base ip '$ip' or test listener)" >&2; return 1
+  orb -m "$BASE" -u root bash -c "
+    rm -f /tmp/box-nc.log /tmp/box-nc.pids
+    setsid nohup $cmd4 >>/tmp/box-nc.log 2>&1 </dev/null & echo \$! >> /tmp/box-nc.pids
+    setsid nohup $cmd6 >>/tmp/box-nc.log 2>&1 </dev/null & echo \$! >> /tmp/box-nc.pids"
+  for _ in 1 2 3 4 5; do
+    orb -m "$BASE" bash -c "nc -z -w 1 127.0.0.1 $port4" && { ok=true; break; }
+    sleep 1
+  done
+  if [ -z "$ip" ] || ! $ok; then
+    echo "error: isolation test setup failed (base ip '$ip', listener up: $ok)" >&2
+    echo "  listener command (in $BASE, as root): setsid nohup $cmd4 &" >&2
+    echo "  listener stderr:" >&2
+    orb -m "$BASE" -u root bash -c 'cat /tmp/box-nc.log; echo "  processes:"; pgrep -a nc || echo "  (no nc running)"' 2>&1 | sed 's/^/    /' >&2 || true
+    stop_listeners; return 1
   fi
   orb -m "$1" ping -c 1 -W 2 "$ip" >/dev/null 2>&1 && reached="ping"
-  orb -m "$1" nc -z -w 3 "$ip" 4444 >/dev/null 2>&1 && reached="$reached tcp"
+  orb -m "$1" nc -z -w 3 "$ip" "$port4" >/dev/null 2>&1 && reached="$reached tcp"
   if [ -n "$ip6" ]; then
     orb -m "$1" ping -6 -c 1 -W 2 "$ip6" >/dev/null 2>&1 && reached="$reached ping6"
     # only meaningful if the base itself answers on v6
-    if orb -m "$BASE" bash -c "nc -6 -z -w 2 $ip6 4444"; then
-      orb -m "$1" nc -6 -z -w 3 "$ip6" 4444 >/dev/null 2>&1 && reached="$reached tcp6"
+    if orb -m "$BASE" bash -c "nc -6 -z -w 2 $ip6 $port6"; then
+      orb -m "$1" nc -6 -z -w 3 "$ip6" "$port6" >/dev/null 2>&1 && reached="$reached tcp6"
     fi
   fi
   orb -m "$1" curl -fsS -m 15 -o /dev/null https://github.com || web=false
-  orb -m "$BASE" -u root pkill -f 'nc -lk 4444' || true
-  $base_up || orb stop "$BASE"
+  stop_listeners
   [ -z "$reached" ] || { echo "error: '$1' reached $BASE ($ip ${ip6:-no ipv6}) by:$reached - isolation failed" >&2; return 1; }
   $web || { echo "error: '$1' cannot reach https://github.com - gateway/DNS rules too strict?" >&2; return 1; }
   echo "isolation ok: '$1' cannot ping or connect to $BASE ($ip ${ip6:-no ipv6}); github.com reachable"
