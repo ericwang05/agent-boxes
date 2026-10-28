@@ -1,0 +1,246 @@
+#!/usr/bin/env bash
+# box new|rm|ls: a GitHub repo plus a sandboxed machine where an agent grills you, then builds.
+# Box layer: box/sandbox new|exec|rm|ls <name>. Box side expects GH_TOKEN (agent token) in the box environment.
+set -euo pipefail
+
+owner=ericwang05
+sandbox="${BOX_SANDBOX:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../box/sandbox}"
+agent_file="$HOME/.config/agent-account"
+dry=false
+
+usage() {
+  cat <<'EOF'
+Usage: box [--dry-run] new NAME [--python VER] [--node VER] [--packages "a b"]
+       box [--dry-run] rm NAME
+       box ls
+
+--dry-run prints every command instead of running it.
+EOF
+}
+die() { echo "box: $*" >&2; exit 1; }
+
+# Run a command, or just print it under --dry-run.
+run() {
+  if $dry; then printf '+'; printf ' %q' "$@"; echo; else "$@"; fi
+}
+# Run a command whose stdin is a heredoc: print the heredoc too under --dry-run.
+run_in() {
+  if $dry; then printf '+'; printf ' %q' "$@"; echo ' <<STDIN'; cat; echo STDIN; else "$@"; fi
+}
+
+[ "${1:-}" != --dry-run ] || { dry=true; shift; }
+cmd="${1:-}"; shift || true
+
+case "$cmd" in
+  ls) run "$sandbox" ls; exit ;;
+  rm)
+    name="${1:?usage: box rm NAME}"
+    # The machine may never have been added; still remove the box.
+    run herdr machine remove "$name" || echo "box: herdr machine remove failed, continuing" >&2
+    run "$sandbox" rm "$name"
+    exit ;;
+  new) ;;
+  -h | --help | "") usage; exit ;;
+  *) usage >&2; die "unknown command: $cmd" ;;
+esac
+
+name="${1:?usage: box new NAME [options]}"; shift
+python="" node="" packages=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --python) python="${2:?--python needs a value}"; shift 2 ;;
+    --node) node="${2:?--node needs a value}"; shift 2 ;;
+    --packages) packages="${2?--packages needs a value}"; shift 2 ;;
+    *) usage >&2; die "unknown argument: $1" ;;
+  esac
+done
+
+# Validate everything up front so a bad flag never leaves a half-made box.
+[[ "$name" =~ ^[a-z][a-z0-9-]*$ ]] || die "NAME must be lowercase letters, digits, dashes (it is also the ssh user): $name"
+nix_packages=()
+if [ -n "$python" ]; then
+  [[ "$python" =~ ^3\.[0-9]+$ ]] || die "--python must look like 3.12"
+  nix_packages+=("python${python/./}" uv)
+fi
+if [ -n "$node" ]; then
+  [[ "$node" =~ ^[0-9]+$ ]] || die "--node must be a major version like 22"
+  nix_packages+=("nodejs_${node}")
+fi
+for pkg in $packages; do
+  [[ "$pkg" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] || die "invalid package attribute: $pkg"
+  nix_packages+=("$pkg")
+done
+[ -r "$agent_file" ] || die "missing $agent_file (agent GitHub username)"
+agent="$(tr -d '[:space:]' <"$agent_file")"
+[ -n "$agent" ] || die "$agent_file is empty"
+if ! $dry; then
+  for tool in gh git herdr jq; do command -v "$tool" >/dev/null || die "$tool not found"; done
+  [ -x "$sandbox" ] || die "box layer not found or not executable: $sandbox"
+  [ "$(gh api user --jq .login 2>/dev/null)" = "$owner" ] || die "gh is not logged in as $owner; run: gh auth login"
+  ! gh repo view "$owner/$name" >/dev/null 2>&1 || die "repo $owner/$name already exists"
+fi
+
+# --- 1. Mac side: repo contents ---
+dir="$(mktemp -d "${TMPDIR:-/tmp}/box.XXXXXX")"
+$dry || trap 'rm -rf "$dir"' EXIT
+cd "$dir"
+git init -q -b main
+
+{
+  cat <<'EOF'
+{
+  description = "dev shell";
+
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-26.05-darwin";
+
+  outputs = { self, nixpkgs }:
+    let
+      forAllSystems = nixpkgs.lib.genAttrs [ "aarch64-darwin" "x86_64-linux" "aarch64-linux" ];
+    in
+    {
+      devShells = forAllSystems (system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+        in
+        {
+          default = pkgs.mkShell {
+            packages = with pkgs; [
+              git
+              jq
+              ripgrep
+              fd
+              just
+EOF
+  for pkg in ${nix_packages[@]+"${nix_packages[@]}"}; do echo "              $pkg"; done
+  cat <<'EOF'
+            ];
+          };
+        });
+    };
+}
+EOF
+} >flake.nix
+
+echo "use flake" >.envrc
+[ -z "$python" ] || echo "export UV_PYTHON_DOWNLOADS=never" >>.envrc
+printf '.direnv/\n.DS_Store\nresult\n' >.gitignore
+[ -z "$python" ] || echo ".venv/" >>.gitignore
+: >done.sh
+chmod +x done.sh
+mkdir -p tests/acceptance .github/workflows
+: >tests/acceptance/.gitkeep
+printf '%s\n' /.github/ /done.sh /tests/acceptance/ | sed "s/\$/ @$owner/" >.github/CODEOWNERS
+
+cat >AGENTS.md <<EOF
+# $name
+
+- Work on branch \`agent\` and push often. CI merges to \`main\` when \`done.sh\` passes.
+- Never edit \`done.sh\`, \`tests/acceptance/\` or \`.github/\`.
+- Python packages go in \`pyproject.toml\` via \`uv\`; system tools go in \`flake.nix\`.
+- If blocked, write \`REPORT.md\` (done / blocked + why / what you need), push, stop.
+EOF
+
+# A PR made with GITHUB_TOKEN triggers no workflows; the push run's "done" check on the same commit satisfies the ruleset.
+cat >.github/workflows/done.yml <<'EOF'
+name: done
+on:
+  push:
+    branches: [agent]
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  done:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31.11.2
+      - run: nix develop -c ./done.sh
+  merge:
+    if: github.event_name == 'push'
+    needs: done
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - run: |
+          [ "$(git rev-list --count origin/main..HEAD)" -gt 0 ] || exit 0
+          [ -n "$(gh pr list --head agent --base main --json number --jq '.[].number')" ] ||
+            gh pr create --head agent --base main --title "agent" --body "Opened by CI after done.sh passed."
+          gh pr merge agent --auto --rebase
+EOF
+
+command -v nix >/dev/null && nix --extra-experimental-features "nix-command flakes" flake lock 2>/dev/null || true
+git add -A
+git commit -q -m "Initial commit"
+
+echo "==> Creating GitHub repo $owner/$name"
+repo="repos/$owner/$name"
+run gh repo create "$owner/$name" --public --source . --remote origin
+run git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push -q origin main
+run gh api -X PATCH "$repo" -F allow_auto_merge=true
+run gh api -X PUT "$repo/actions/permissions/workflow" -F can_approve_pull_request_reviews=true
+run_in gh api -X POST "$repo/rulesets" --input - <<'EOF'
+{
+  "name": "main",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": { "ref_name": { "include": ["~DEFAULT_BRANCH"], "exclude": [] } },
+  "rules": [
+    { "type": "pull_request", "parameters": {
+        "required_approving_review_count": 0,
+        "dismiss_stale_reviews_on_push": false,
+        "require_code_owner_review": true,
+        "require_last_push_approval": false,
+        "required_review_thread_resolution": false } },
+    { "type": "required_status_checks", "parameters": {
+        "strict_required_status_checks_policy": true,
+        "required_status_checks": [{ "context": "done" }] } },
+    { "type": "non_fast_forward" },
+    { "type": "deletion" }
+  ]
+}
+EOF
+run gh api -X PUT "$repo/collaborators/$agent" -f permission=push
+
+# --- 2. Box side ---
+echo "==> Creating box $name"
+run "$sandbox" new "$name"
+# The invite can lag behind the PUT above, so retry the accept.
+run_in "$sandbox" exec "$name" bash -s <<EOF
+set -euo pipefail
+[ -n "\${GH_TOKEN:-}" ] || { echo "box: GH_TOKEN (agent token) missing in the box" >&2; exit 1; }
+for _ in \$(seq 30); do
+  id="\$(gh api /user/repository_invitations --jq '.[] | select(.repository.full_name == "$owner/$name") | .id')"
+  [ -z "\$id" ] || break
+  sleep 2
+done
+[ -n "\$id" ] || { echo "box: no invitation to $owner/$name found" >&2; exit 1; }
+gh api -X PATCH "/user/repository_invitations/\$id"
+gh auth setup-git
+git config --global user.name "$agent"
+git config --global user.email "$agent@users.noreply.github.com"
+gh repo clone $owner/$name ~/$name
+cd ~/$name
+git switch -c agent
+(nohup herdr server >/tmp/herdr-server.log 2>&1 &)
+for _ in \$(seq 30); do herdr workspace list >/dev/null 2>&1 && break; sleep 1; done
+pane="\$(herdr workspace create --cwd ~/$name --label $name --no-focus | jq -r .result.root_pane.pane_id)"
+# The pane's shell is busy loading direnv at first, so retry the start.
+for _ in \$(seq 120); do
+  herdr agent start $name --kind claude --pane "\$pane" >/dev/null 2>&1 && break
+  sleep 1
+done
+herdr agent prompt $name "/pstack:poteto-mode Grill me about what this project should be until you could brief a new engineer. Then write tests/acceptance and done.sh to define done, open a PR, and wait for my approval before building."
+EOF
+
+# --- 3. Mac side: show the box in herdr ---
+run herdr machine add "ssh://$name@orb" --label "$name"
+echo "box $name ready: github.com/$owner/$name"
