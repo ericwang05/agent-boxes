@@ -138,7 +138,7 @@ cat >AGENTS.md <<EOF
 
 - One branch and one PR per change: \`git fetch && git switch -c <type>/<short-name> origin/main\`, commit, \`git push -u origin HEAD\`, then open the PR (CI also opens one if you forget). CI merges it to \`main\` when \`done.sh\` passes and deletes the branch.
 - Never reuse a merged branch and never force-push. If main moved on and your open branch fell behind, start a fresh branch from \`origin/main\` and cherry-pick instead.
-- After pushing, run \`gh pr checks --watch\` and wait for green. On a failure, read the log, fix it on the same branch, push, and watch again. Do not move on to the next change until the PR has merged.
+- After pushing, run \`gh pr checks --watch\` and wait for green. On a failure, read the log with \`gh run view <run-id> --log-failed\` (run id from \`gh run list --branch <branch>\`) before changing anything, then fix it on the same branch, push, and watch again. Do not move on to the next change until the PR has merged.
 - Never edit \`.github/\`. Edit \`done.sh\` and \`tests/acceptance/\` only when I explicitly ask you to define or change "done", and only while main's \`done.sh\` is still the empty placeholder: after that CI rejects such PRs and only I change them on main.
 - Open small PRs, one change each. Use the pstack \`poteto-mode\` Autopilot-full playbook (\`playbooks/autopilot-full.md\`) for queues of PRs, and its Shipping playbook (\`playbooks/shipping.md\`) to verify before landing.
 - Python packages go in \`pyproject.toml\` via \`uv\`; system tools go in \`flake.nix\`.
