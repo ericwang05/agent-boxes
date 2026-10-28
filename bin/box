@@ -159,8 +159,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
       - uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31.11.2
-      - run: nix develop -c ./done.sh
+      - run: |
+          # Until main has a real done.sh, only a spec change may pass.
+          if [ -z "$(git show origin/main:done.sh | tr -d '[:space:]')" ]; then
+            extra="$(git diff --name-only origin/main...HEAD | grep -v -E '^(done\.sh|SPEC\.md|tests/acceptance/)' || true)"
+            if [ -n "$extra" ]; then
+              echo "main has no spec yet: only done.sh, tests/acceptance/ and SPEC.md may change. Offending files:"
+              echo "$extra"
+              exit 1
+            fi
+            echo "bootstrap: spec-only change, nothing to run"
+            exit 0
+          fi
+          # Judge the PR by main's definition of done, never its own.
+          rm -rf tests/acceptance
+          git checkout origin/main -- done.sh tests/acceptance
+          nix develop -c ./done.sh
   merge:
     if: github.event_name == 'push'
     needs: done
