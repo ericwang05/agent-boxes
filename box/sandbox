@@ -45,8 +45,6 @@ harden() {
     fi'
 }
 
-running() { orb list 2>/dev/null | awk -v n="$1" '$1 == n && $2 == "running" { f=1 } END { exit !f }'; }
-
 # Egress rules: LAN block, plus exceptions for this box's own gateway and DNS inside OrbStack's two
 # internal ranges (other boxes and the host there are rejected), and no IPv6 egress at all.
 # The generator is root-owned and re-run by a systemd oneshot at every boot, so gateway/DNS drift
