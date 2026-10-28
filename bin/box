@@ -67,7 +67,8 @@ case "$cmd" in
       src="$(jq -r --arg m "${plugin#*@}" '.extraKnownMarketplaces[$m].source | .repo // .url // empty' "$claude_dir/settings.json")"
       [ -n "$src" ] || die "no marketplace source for $plugin in extraKnownMarketplaces"
       # marketplace add fails if it is already there; install below still fails if it is truly missing.
-      run orb -m box-base bash -lc 'claude plugin marketplace add "$1" || true; claude plugin install "$2"' _ "$src" "$plugin"
+      # </dev/null: orb would otherwise eat the rest of the plugin list from the loop's stdin.
+      run orb -m box-base bash -lc 'claude plugin marketplace add "$1" || true; claude plugin install "$2"' _ "$src" "$plugin" </dev/null
     done < <(jq -r '.enabledPlugins // {} | keys[]' "$claude_dir/settings.json")
     $dry || orb stop box-base
     exit ;;
