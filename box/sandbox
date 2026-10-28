@@ -5,9 +5,14 @@ set -euo pipefail
 BASE=box-base
 HERE=$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && pwd)
 TOKEN_FILE="${AGENT_TOKEN_FILE:-$HOME/agent-boxes/.agent-token}"
-ACCOUNT_FILE="$HOME/.config/agent-account"
+CLAUDE_TOKEN_FILE="$HOME/agent-boxes/.claude-token"
+CONFIG_FILE="$HOME/.config/agent-boxes/config"
 SANDBOX_DISTRO="${SANDBOX_DISTRO:-debian:trixie}"
 SANDBOX_USER="${USER:-$(id -un)}"
+# Optional BOX_CPUS, BOX_MEMORY_MIB; required GIT_NAME, GIT_EMAIL.
+[ ! -r "$CONFIG_FILE" ] || . "$CONFIG_FILE"
+BOX_CPUS="${BOX_CPUS:-4}"
+BOX_MEMORY_MIB="${BOX_MEMORY_MIB:-8192}"
 
 usage() {
   cat <<'USAGE'
@@ -41,24 +46,6 @@ harden() {
 }
 
 running() { orb list 2>/dev/null | awk -v n="$1" '$1 == n && $2 == "running" { f=1 } END { exit !f }'; }
-
-# The self-test and firewall generator need ping, nc and ip in the base. Install them there once, as root, so no rebuild is needed.
-# The base's own firewall rejects its gateway, so lift it just for the install and reload it after.
-ensure_base_tools() {
-  local was_up=false
-  running "$BASE" && was_up=true
-  $was_up || orb start "$BASE"
-  if ! orb -m "$BASE" bash -c 'command -v ping nc ip >/dev/null'; then
-    echo "installing ping, nc and ip into $BASE (one time)"
-    orb -m "$BASE" -u root bash -c '
-      rc=0
-      nft flush ruleset
-      apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends iputils-ping netcat-openbsd iproute2 || rc=$?
-      nft -f /etc/nftables.conf
-      exit $rc' || { $was_up || orb stop "$BASE"; echo "error: could not install ping/nc/ip into $BASE" >&2; return 1; }
-  fi
-  $was_up || orb stop "$BASE"
-}
 
 # Egress rules: LAN block, plus exceptions for this box's own gateway and DNS inside OrbStack's two
 # internal ranges (other boxes and the host there are rejected), and no IPv6 egress at all.
@@ -119,70 +106,29 @@ systemctl enable box-firewall.service
 FW
 }
 
-# Fail closed. box-base is the target (started for the test, stopped again if it was not running),
-# with listeners inside it so a failed TCP connect proves the rules, not a closed port.
+# Fail closed: the internet works, and neither the host nor the LAN gateway is reachable.
 check_isolation() {
-  local base_up=false ip ip6 reached="" web=true ok=false cmd4 cmd6
-  local port4=47391 port6=47392
-  cmd4="nc -lk 0.0.0.0 $port4"; cmd6="nc -6 -lk :: $port6"
-  orb -m "$1" bash -c 'command -v ping nc curl >/dev/null' \
-    || { echo "error: '$1' lacks ping, nc or curl" >&2; return 1; }
-  running "$BASE" && base_up=true
-  $base_up || orb start "$BASE"
-  # one place to tear down: listeners are killed on every exit path, then the base is stopped if we started it
-  stop_listeners() {
-    orb -m "$BASE" -u root bash -c 'kill $(cat /tmp/box-nc.pids 2>/dev/null) 2>/dev/null; pkill -f "nc .*-lk .* 4739[12]"; rm -f /tmp/box-nc.pids' || true
-    $base_up || orb stop "$BASE"
-  }
-  ip="$(orb -m "$BASE" hostname -I | awk '{print $1}')"
-  ip6="$(orb -m "$BASE" hostname -I | tr ' ' '\n' | grep ':' | grep -vi '^fe80' | head -1 || true)"
-  orb -m "$BASE" -u root bash -c "
-    rm -f /tmp/box-nc.log /tmp/box-nc.pids
-    setsid nohup $cmd4 >>/tmp/box-nc.log 2>&1 </dev/null & echo \$! >> /tmp/box-nc.pids
-    setsid nohup $cmd6 >>/tmp/box-nc.log 2>&1 </dev/null & echo \$! >> /tmp/box-nc.pids"
-  for _ in 1 2 3 4 5; do
-    orb -m "$BASE" bash -c "nc -z -w 1 127.0.0.1 $port4" && { ok=true; break; }
-    sleep 1
-  done
-  local skipped=false
-  if [ -z "$ip" ] || ! $ok; then
-    skipped=true
-    echo "warn: box-to-box test skipped, setup failed (base ip '$ip', listener up: $ok)" >&2
-    echo "  listener command (in $BASE, as root): setsid nohup $cmd4 &" >&2
-    echo "  listener stderr:" >&2
-    orb -m "$BASE" -u root bash -c 'cat /tmp/box-nc.log; echo "  processes:"; pgrep -a nc || echo "  (no nc running)"' 2>&1 | sed 's/^/    /' >&2 || true
-  fi
-  if ! $skipped; then
-    orb -m "$1" ping -c 1 -W 2 "$ip" >/dev/null 2>&1 && reached="ping"
-    orb -m "$1" nc -z -w 3 "$ip" "$port4" >/dev/null 2>&1 && reached="$reached tcp"
-  fi
-  if ! $skipped && [ -n "$ip6" ]; then
-    orb -m "$1" ping -6 -c 1 -W 2 "$ip6" >/dev/null 2>&1 && reached="$reached ping6"
-    # only meaningful if the base itself answers on v6
-    if orb -m "$BASE" bash -c "nc -6 -z -w 2 $ip6 $port6"; then
-      orb -m "$1" nc -6 -z -w 3 "$ip6" "$port6" >/dev/null 2>&1 && reached="$reached tcp6"
-    fi
-  fi
-  orb -m "$1" curl -fsS -m 15 -o /dev/null https://github.com || web=false
-  stop_listeners
-  # box-to-box is a warning (the rules stay installed); internet is fatal
-  [ -z "$reached" ] || echo "warn: '$1' reached $BASE ($ip ${ip6:-no ipv6}) by:$reached - box-to-box isolation NOT working" >&2
-  $web || { echo "error: '$1' cannot reach https://github.com - gateway/DNS rules too strict?" >&2; return 1; }
-  if $skipped; then echo "github.com reachable; box-to-box isolation unverified"
-  elif [ -z "$reached" ]; then echo "isolation ok: '$1' cannot ping or connect to $BASE ($ip ${ip6:-no ipv6}); github.com reachable"
-  fi
+  orb -m "$1" curl -fsS -m 15 -o /dev/null https://github.com \
+    || { echo "error: '$1' cannot reach https://github.com - gateway/DNS rules too strict?" >&2; return 1; }
+  ! orb -m "$1" curl -m 3 -s -o /dev/null http://host.orb.internal \
+    || { echo "error: '$1' can reach the host (host.orb.internal)" >&2; return 1; }
+  ! orb -m "$1" curl -m 3 -s -o /dev/null http://192.168.1.1 \
+    || { echo "error: '$1' can reach the LAN (192.168.1.1)" >&2; return 1; }
+  echo "isolation ok: github.com reachable; host and LAN blocked"
 }
 
-# Token goes over stdin, never argv. Per box, so rotating it needs no base rebuild.
+# Tokens and git identity go over stdin/env, never argv, and are set per box so the base holds no credentials.
 inject_token() {
-  { tr -d '[:space:]' < "$ACCOUNT_FILE"; echo; tr -d '[:space:]' < "$TOKEN_FILE"; echo; } |
-    orb -m "$1" -u root env SETUP_USER="$SANDBOX_USER" bash -c '
+  { tr -d '[:space:]' < "$TOKEN_FILE"; echo; tr -d '[:space:]' < "$CLAUDE_TOKEN_FILE"; echo; } |
+    orb -m "$1" env GIT_NAME="$GIT_NAME" GIT_EMAIL="$GIT_EMAIL" bash -c '
       set -e
-      read -r agent; read -r token
-      h=/home/$SETUP_USER
-      printf "https://%s:%s@github.com\n" "$agent" "$token" > $h/.git-credentials
-      chown $SETUP_USER:$SETUP_USER $h/.git-credentials; chmod 600 $h/.git-credentials
-      printf "export GH_TOKEN=%s\n" "$token" > /etc/profile.d/gh-token.sh; chmod 644 /etc/profile.d/gh-token.sh'
+      read -r gh_token; read -r claude_token
+      printf %s "$gh_token" | gh auth login --with-token
+      gh auth setup-git
+      git config --global user.name "$GIT_NAME"
+      git config --global user.email "$GIT_EMAIL"
+      umask 077
+      printf "export CLAUDE_CODE_OAUTH_TOKEN=%s\n" "$claude_token" > ~/.claude-token-env'
 }
 
 cmd="${1:-help}"; shift || true
@@ -200,9 +146,8 @@ case "$cmd" in
     cat <<STEPS
 
 Base ready. One-time steps (done once, inside the base, so every clone has them):
-  orb start $BASE && orb -m $BASE
-  claude auth login
-  claude            # then run: /pstack:setup-pstack
+  orb start $BASE && ssh $BASE@orb
+  claude            # run only: /pstack:setup-pstack (auth is per box now)
   exit && orb stop $BASE
 
 Then: $0 new <name>
@@ -213,11 +158,12 @@ STEPS
     exists "$BASE" || { echo "error: no base - run: $0 base" >&2; exit 1; }
     exists "$name" && { echo "error: '$name' already exists" >&2; exit 1; }
     [ -r "$TOKEN_FILE" ] || { echo "error: no agent token at $TOKEN_FILE" >&2; exit 1; }
-    [ -r "$ACCOUNT_FILE" ] || { echo "error: no agent username at $ACCOUNT_FILE" >&2; exit 1; }
+    [ -r "$CLAUDE_TOKEN_FILE" ] || { echo "error: no Claude token at $CLAUDE_TOKEN_FILE (from: claude setup-token)" >&2; exit 1; }
+    [ -n "${GIT_NAME:-}" ] && [ -n "${GIT_EMAIL:-}" ] || { echo "error: set GIT_NAME and GIT_EMAIL in $CONFIG_FILE" >&2; exit 1; }
     trap 'orb delete -f "$name" >/dev/null 2>&1 || true; echo "error: creation failed, cleaned up" >&2' ERR
-    orb config set "machine.$BASE.isolate_network" true
-    ensure_base_tools
     orb clone "$BASE" "$name"
+    orb config set "machine.$name.cpu" "$BOX_CPUS"
+    orb config set "machine.$name.memory_mib" "$BOX_MEMORY_MIB"
     orb config set "machine.$name.isolated" true
     orb config set "machine.$name.isolate_network" true
     # config is read at boot, so restart the clone before testing it

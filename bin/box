@@ -1,18 +1,29 @@
 #!/usr/bin/env bash
-# box new|rm|ls: a GitHub repo plus a sandboxed machine where an agent grills you, then builds.
-# Box layer: box/sandbox new|exec|rm|ls <name>. Box side expects GH_TOKEN (agent token) in the box environment.
+# box new|reset|retire|rm|versions|ls: the environment for a project, not its workflow.
+# new: GitHub repo (nix dev shell, release-per-merge workflow) plus a sandboxed machine running an agent.
+# reset: rebuild the machine from the existing repo, optionally at a commit or tag. retire: remove the machine and the agent's access.
+# Box layer: box/sandbox new|exec|rm|ls <name>. The box is logged in to gh as the agent account.
+# Config: ~/.config/agent-boxes/config sets OWNER (GitHub user owning repos) and AGENT (agent GitHub username).
 set -euo pipefail
 
-owner=ericwang05
 sandbox="${BOX_SANDBOX:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../box/sandbox}"
-agent_file="$HOME/.config/agent-account"
+config="$HOME/.config/agent-boxes/config"
 dry=false
 
 usage() {
   cat <<'EOF'
 Usage: box [--dry-run] new NAME [--python VER] [--node VER] [--packages "a b"] [--prompt TEXT]
+       box [--dry-run] reset NAME [--ref COMMIT|TAG]
+       box [--dry-run] retire NAME
        box [--dry-run] rm NAME
+       box [--dry-run] versions NAME
        box ls
+
+new      create the repo and a box
+reset    delete the box and make a fresh one from the existing repo (at --ref if given)
+retire   delete the box and remove the agent's access to the repo
+rm       delete the box only; the repo and access stay
+versions list the repo's releases (one per merge to main)
 
 --dry-run prints every command instead of running it.
 EOF
@@ -303,7 +314,6 @@ run herdr machine add "ssh://$name@orb" --label "$name" --remote-session default
 # The invite can lag behind the PUT above, so retry the accept.
 run_in "$sandbox" exec "$name" bash -s <<EOF
 set -euo pipefail
-[ -n "\${GH_TOKEN:-}" ] || { echo "box: GH_TOKEN (agent token) missing in the box" >&2; exit 1; }
 for _ in \$(seq 30); do
   id="\$(gh api user/repository_invitations --paginate --jq 'first(.[] | select(.repository.full_name == "$owner/$name") | .id) // empty')"
   [ -z "\$id" ] || break
@@ -311,17 +321,12 @@ for _ in \$(seq 30); do
 done
 [ -n "\$id" ] || { echo "box: no invitation to $owner/$name found" >&2; exit 1; }
 gh api -X PATCH "user/repository_invitations/\$id"
-# GH_TOKEN alone is not enough: herdr panes may not source /etc/profile.d. gh refuses to store a token while GH_TOKEN is set.
-printf %s "\$GH_TOKEN" | env -u GH_TOKEN gh auth login --with-token
-gh auth setup-git
 gh repo clone $owner/$name ~/$name
 cd ~/$name
-# Pre-accept folder trust and the bypass prompt so the agent never blocks on a dialog.
+# Pre-accept folder trust so the agent never blocks on a dialog.
 mkdir -p ~/.claude
 [ -s ~/.claude.json ] || echo '{}' > ~/.claude.json
-[ -s ~/.claude/settings.json ] || echo '{}' > ~/.claude/settings.json
 jq --arg p "\$HOME/$name" '.projects[\$p].hasTrustDialogAccepted = true' ~/.claude.json > ~/.claude.json.tmp && mv ~/.claude.json.tmp ~/.claude.json
-jq '.skipDangerousModePermissionPrompt = true' ~/.claude/settings.json > ~/.claude/settings.json.tmp && mv ~/.claude/settings.json.tmp ~/.claude/settings.json
 for _ in \$(seq 30); do herdr workspace list >/dev/null 2>&1 && break; sleep 1; done
 pane="\$(herdr workspace create --cwd ~/$name --label $name --no-focus | jq -r .result.root_pane.pane_id)"
 # The pane's shell is busy loading direnv at first, so retry the start.
