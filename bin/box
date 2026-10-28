@@ -216,6 +216,13 @@ run gh api -X PUT "$repo/collaborators/$agent" -f permission=push
 # --- 2. Box side (machine add inside this step starts the box herdr server) ---
 echo "==> Creating box $name"
 run "$sandbox" new "$name"
+# herdr reaches the box over ssh; fail here with a hint rather than inside machine add.
+ssh_ok=false
+for _ in $(seq 10); do
+  run ssh -o BatchMode=yes "$name@orb" true && { ssh_ok=true; break; }
+  sleep 1
+done
+$ssh_ok || die "cannot ssh $name@orb non-interactively; make sure ~/.ssh/config has 'Include ~/.orbstack/ssh/config' (or a 'Host orb' entry for OrbStack)"
 # Before any pane exists: machine add starts the box's herdr server and may restart it, killing panes.
 # No tty on stdin keeps it non-interactive; a fresh box has herdr installed and no server, so nothing to confirm.
 run herdr machine add "ssh://$name@orb" --label "$name" --remote-session default </dev/null
@@ -235,6 +242,12 @@ git config --global user.name "$agent"
 git config --global user.email "$agent@users.noreply.github.com"
 gh repo clone $owner/$name ~/$name
 cd ~/$name
+# Pre-accept folder trust and the bypass prompt so the agent never blocks on a dialog.
+mkdir -p ~/.claude
+[ -s ~/.claude.json ] || echo '{}' > ~/.claude.json
+[ -s ~/.claude/settings.json ] || echo '{}' > ~/.claude/settings.json
+jq --arg p "\$HOME/$name" '.projects[\$p].hasTrustDialogAccepted = true' ~/.claude.json > ~/.claude.json.tmp && mv ~/.claude.json.tmp ~/.claude.json
+jq '.skipDangerousModePermissionPrompt = true' ~/.claude/settings.json > ~/.claude/settings.json.tmp && mv ~/.claude/settings.json.tmp ~/.claude/settings.json
 git switch -c agent
 for _ in \$(seq 30); do herdr workspace list >/dev/null 2>&1 && break; sleep 1; done
 pane="\$(herdr workspace create --cwd ~/$name --label $name --no-focus | jq -r .result.root_pane.pane_id)"
@@ -243,7 +256,13 @@ for _ in \$(seq 120); do
   herdr agent start $name --kind claude --pane "\$pane" >/dev/null 2>&1 && break
   sleep 1
 done
-herdr agent prompt $name "/pstack:poteto-mode Grill me about what this project should be until you could brief a new engineer. Then write tests/acceptance and done.sh to define done, open a PR, and wait for my approval before building."
+# agent_blocked means a dialog is up; retry for 60s, then warn and carry on (the pane stays attachable).
+sent=false
+for _ in \$(seq 30); do
+  herdr agent prompt $name "/pstack:poteto-mode Grill me about what this project should be until you could brief a new engineer. Then write tests/acceptance and done.sh to define done, open a PR, and wait for my approval before building." >/dev/null 2>&1 && { sent=true; break; }
+  sleep 2
+done
+\$sent || echo "box: agent still blocked after 60s, prompt not sent; answer it in herdr" >&2
 EOF
 
 echo "box $name ready: github.com/$owner/$name"
