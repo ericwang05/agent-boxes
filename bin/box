@@ -184,10 +184,18 @@ if [ "$accept" = 1 ]; then
     ! grep -qi scope <<<"\$out" || echo "box: agent token needs the repo:invite scope" >&2
     exit 1
   fi
-  [ "\$(gh api repos/$owner/$name --jq .permissions.push)" = true ] || { echo "box: agent has no push access to $owner/$name" >&2; exit 1; }
 fi
 gh repo clone $owner/$name ~/$name
 cd ~/$name
+if [ "$accept" = 1 ]; then
+  # Collaborator access can lag the accept; a dry-run push exercises the same auth as a real one.
+  pushed=false
+  for _ in \$(seq 15); do
+    if err="\$(git push --dry-run origin main 2>&1)"; then pushed=true; break; fi
+    sleep 2
+  done
+  \$pushed || { echo "box: agent cannot push to $owner/$name; last git error:" >&2; echo "\$err" >&2; exit 1; }
+fi
 [ -z "$ref" ] || git checkout "$ref"
 direnv allow ~/$name
 # Pre-accept folder trust so the agent never blocks on a dialog.
@@ -246,7 +254,9 @@ armed=false
 cleanup() {
   local rc=$?
   trap - EXIT
-  if $armed && [ $rc -ne 0 ]; then
+  if $armed && [ $rc -ne 0 ] && [ "${BOX_KEEP:-}" = 1 ]; then
+    echo "box: new failed; $name and $owner/$name kept for debugging" >&2
+  elif $armed && [ $rc -ne 0 ]; then
     echo "box: new failed, rolling back $name" >&2
     armed=false
     machine_remove || true
