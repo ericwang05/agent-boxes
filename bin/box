@@ -132,7 +132,6 @@ Host orb
   # The invite can lag behind the PUT, so retry the accept.
   run_in "$sandbox" exec "$name" bash -s <<EOF
 set -euo pipefail
-[ -n "\${GH_TOKEN:-}" ] || { echo "box: GH_TOKEN (agent token) missing in the box" >&2; exit 1; }
 if [ "$accept" = 1 ]; then
   for _ in \$(seq 30); do
     id="\$(gh api user/repository_invitations --paginate --jq 'first(.[] | select(.repository.full_name == "$owner/$name") | .id) // empty')"
@@ -142,9 +141,6 @@ if [ "$accept" = 1 ]; then
   [ -n "\$id" ] || { echo "box: no invitation to $owner/$name found" >&2; exit 1; }
   gh api -X PATCH "user/repository_invitations/\$id"
 fi
-# GH_TOKEN alone is not enough: herdr panes may not source /etc/profile.d. gh refuses to store a token while GH_TOKEN is set.
-printf %s "\$GH_TOKEN" | env -u GH_TOKEN gh auth login --with-token
-gh auth setup-git
 gh repo clone $owner/$name ~/$name
 cd ~/$name
 [ -z "$ref" ] || git checkout "$ref"
