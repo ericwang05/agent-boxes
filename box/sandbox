@@ -40,11 +40,38 @@ harden() {
     fi'
 }
 
-# Replace the base ruleset with the LAN block plus exceptions for this box's own gateway and DNS
-# inside OrbStack's two internal ranges. Everything else in them (other boxes, the host) is rejected.
+running() { orb list 2>/dev/null | awk -v n="$1" '$1 == n && $2 == "running" { f=1 } END { exit !f }'; }
+
+# The self-test and firewall generator need ping, nc and ip in the base. Install them there once, as root, so no rebuild is needed.
+# The base's own firewall rejects its gateway, so lift it just for the install and reload it after.
+ensure_base_tools() {
+  local was_up=false
+  running "$BASE" && was_up=true
+  $was_up || orb start "$BASE"
+  if ! orb -m "$BASE" bash -c 'command -v ping nc ip >/dev/null'; then
+    echo "installing ping, nc and ip into $BASE (one time)"
+    orb -m "$BASE" -u root bash -c '
+      rc=0
+      nft flush ruleset
+      apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends iputils-ping netcat-openbsd iproute2 || rc=$?
+      nft -f /etc/nftables.conf
+      exit $rc' || { $was_up || orb stop "$BASE"; echo "error: could not install ping/nc/ip into $BASE" >&2; return 1; }
+  fi
+  $was_up || orb stop "$BASE"
+}
+
+# Egress rules: LAN block, plus exceptions for this box's own gateway and DNS inside OrbStack's two
+# internal ranges (other boxes and the host there are rejected), and no IPv6 egress at all.
+# The generator is root-owned and re-run by a systemd oneshot at every boot, so gateway/DNS drift
+# cannot silently break or widen the rules. The agent has no sudo and cannot edit either file.
 install_firewall() {
   orb -m "$1" -u root bash -s <<'FW'
 set -euo pipefail
+cat > /usr/local/sbin/box-firewall <<'GEN'
+#!/usr/bin/env bash
+# Regenerate /etc/nftables.conf from the current gateway and DNS, then load it.
+set -euo pipefail
+for _ in $(seq 30); do ip -4 route show default | grep -q . && break; sleep 1; done
 allow="$({
   ip -4 route show default | awk '$1 == "default" { for (i = 1; i < NF; i++) if ($i == "via") print $(i + 1) }'
   cat /etc/resolv.conf /run/systemd/resolve/resolv.conf 2>/dev/null | awk '$1 == "nameserver" { print $2 }'
@@ -58,31 +85,50 @@ table inet sandbox {
     type filter hook output priority 0; policy accept;
     oifname "lo" accept
     ct state established,related accept
-    meta l4proto ipv6-icmp accept
     $rule
     ip daddr { 192.168.138.0/23, 198.18.0.0/15 } counter reject comment "other orbstack machines"
     ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16,
                169.254.0.0/16, 100.64.0.0/10 } counter reject
-    ip6 daddr { fc00::/7, fe80::/10 } counter reject
+    ip6 daddr ::/0 counter reject comment "no ipv6 egress, clients fall back to ipv4"
   }
 }
 NFT
 nft -c -f /etc/nftables.conf
-systemctl restart nftables
+nft -f /etc/nftables.conf
 echo "== nftables ruleset installed =="
 nft list ruleset
+GEN
+chmod 755 /usr/local/sbin/box-firewall
+cat > /etc/systemd/system/box-firewall.service <<'UNIT'
+[Unit]
+Description=Regenerate box egress firewall from current gateway and DNS
+After=nftables.service systemd-networkd.service NetworkManager.service systemd-resolved.service
+Before=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/box-firewall
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable box-firewall.service
+/usr/local/sbin/box-firewall
 FW
 }
 
 # Fail closed. box-base is the target (started for the test, stopped again if it was not running),
 # with a listener inside it so a failed TCP connect proves the rules, not a closed port.
 check_isolation() {
-  local base_up=false ip reached=""
+  local base_up=false ip ip6 reached="" web=true
   orb -m "$1" bash -c 'command -v ping nc curl >/dev/null' \
-    || { echo "error: '$1' lacks ping, nc or curl - rebuild the base (sandbox base)" >&2; return 1; }
-  orb list 2>/dev/null | awk -v n="$BASE" '$1 == n && $2 == "running" { f=1 } END { exit !f }' && base_up=true
+    || { echo "error: '$1' lacks ping, nc or curl" >&2; return 1; }
+  running "$BASE" && base_up=true
   $base_up || orb start "$BASE"
   ip="$(orb -m "$BASE" hostname -I | awk '{print $1}')"
+  ip6="$(orb -m "$BASE" hostname -I | tr ' ' '\n' | grep ':' | grep -vi '^fe80' | head -1 || true)"
   orb -m "$BASE" -u root bash -c 'setsid nohup nc -lk 4444 >/dev/null 2>&1 < /dev/null &'
   sleep 1
   if [ -z "$ip" ] || ! orb -m "$BASE" bash -c 'nc -z -w 2 127.0.0.1 4444'; then
@@ -91,13 +137,19 @@ check_isolation() {
   fi
   orb -m "$1" ping -c 1 -W 2 "$ip" >/dev/null 2>&1 && reached="ping"
   orb -m "$1" nc -z -w 3 "$ip" 4444 >/dev/null 2>&1 && reached="$reached tcp"
-  local web=true
+  if [ -n "$ip6" ]; then
+    orb -m "$1" ping -6 -c 1 -W 2 "$ip6" >/dev/null 2>&1 && reached="$reached ping6"
+    # only meaningful if the base itself answers on v6
+    if orb -m "$BASE" bash -c "nc -6 -z -w 2 $ip6 4444"; then
+      orb -m "$1" nc -6 -z -w 3 "$ip6" 4444 >/dev/null 2>&1 && reached="$reached tcp6"
+    fi
+  fi
   orb -m "$1" curl -fsS -m 15 -o /dev/null https://github.com || web=false
   orb -m "$BASE" -u root pkill -f 'nc -lk 4444' || true
   $base_up || orb stop "$BASE"
-  [ -z "$reached" ] || { echo "error: '$1' reached $BASE ($ip) by:$reached - isolation failed" >&2; return 1; }
+  [ -z "$reached" ] || { echo "error: '$1' reached $BASE ($ip ${ip6:-no ipv6}) by:$reached - isolation failed" >&2; return 1; }
   $web || { echo "error: '$1' cannot reach https://github.com - gateway/DNS rules too strict?" >&2; return 1; }
-  echo "isolation ok: '$1' cannot ping or connect to $BASE ($ip); github.com reachable"
+  echo "isolation ok: '$1' cannot ping or connect to $BASE ($ip ${ip6:-no ipv6}); github.com reachable"
 }
 
 # Token goes over stdin, never argv. Per box, so rotating it needs no base rebuild.
@@ -143,6 +195,7 @@ STEPS
     [ -r "$ACCOUNT_FILE" ] || { echo "error: no agent username at $ACCOUNT_FILE" >&2; exit 1; }
     trap 'orb delete -f "$name" >/dev/null 2>&1 || true; echo "error: creation failed, cleaned up" >&2' ERR
     orb config set "machine.$BASE.isolate_network" true
+    ensure_base_tools
     orb clone "$BASE" "$name"
     orb config set "machine.$name.isolated" true
     orb config set "machine.$name.isolate_network" true

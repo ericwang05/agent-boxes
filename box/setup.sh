@@ -10,7 +10,7 @@ as_user() { runuser -u "$SETUP_USER" -- bash -lc "$1"; }
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends \
-    git curl ca-certificates jq ripgrep less procps unzip nftables sudo gh iputils-ping netcat-openbsd
+    git curl ca-certificates jq ripgrep less procps unzip nftables sudo gh iputils-ping netcat-openbsd iproute2
 
 # --- Determinate Nix: multi-user daemon, so the sandbox user needs no sudo ---
 curl -fsSL https://install.determinate.systems/nix | sh -s -- install linux --no-confirm
