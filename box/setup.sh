@@ -22,6 +22,7 @@ echo 'source "$HOME/.nix-profile/share/nix-direnv/direnvrc"' > "$home/.config/di
 touch "$home/.bashrc"
 {
   echo 'export PATH="$HOME/.nix-profile/bin:/nix/var/nix/profiles/default/bin:$HOME/.local/bin:$PATH"'
+  echo '[ -f ~/.gh-token-env ] && . ~/.gh-token-env'
   echo '[ -f ~/.claude-token-env ] && . ~/.claude-token-env'
   cat "$home/.bashrc"
   echo 'eval "$(direnv hook bash)"'

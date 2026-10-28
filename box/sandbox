@@ -121,12 +121,17 @@ inject_token() {
     orb -m "$1" env GIT_NAME="$GIT_NAME" GIT_EMAIL="$GIT_EMAIL" bash -c '
       set -e
       read -r gh_token; read -r claude_token
-      printf %s "$gh_token" | gh auth login --with-token
-      gh auth setup-git
       git config --global user.name "$GIT_NAME"
       git config --global user.email "$GIT_EMAIL"
+      # gh auth login rejects a public_repo-only token, so gh and git read GH_TOKEN from the environment instead.
+      git config --global credential.https://github.com.helper "!gh auth git-credential"
       umask 077
-      printf "export CLAUDE_CODE_OAUTH_TOKEN=%s\n" "$claude_token" > ~/.claude-token-env'
+      printf "export GH_TOKEN=%s\n" "$gh_token" > ~/.gh-token-env
+      printf "export CLAUDE_CODE_OAUTH_TOKEN=%s\n" "$claude_token" > ~/.claude-token-env
+      # Older bases lack the sourcing line; setup.sh adds it for new ones.
+      if ! grep -q gh-token-env ~/.bashrc; then
+        { echo "[ -f ~/.gh-token-env ] && . ~/.gh-token-env"; cat ~/.bashrc; } > ~/.bashrc.new && mv ~/.bashrc.new ~/.bashrc
+      fi'
 }
 
 cmd="${1:-help}"; shift || true
@@ -143,12 +148,7 @@ case "$cmd" in
     orb stop "$BASE"
     cat <<STEPS
 
-Base ready. One-time steps (done once, inside the base, so every clone has them):
-  orb start $BASE && ssh $BASE@orb
-  claude            # run only: /pstack:setup-pstack (auth is per box now)
-  exit && orb stop $BASE
-
-Then: $0 new <name>
+Base ready. Then: $0 new <name>
 STEPS
     ;;
   new)

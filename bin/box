@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# box new|reset|retire|rm|versions|ls: the environment for a project, not its workflow.
+# box new|reset|retire|destroy|rm|versions|base|save-pstack|ls: the environment for a project, not its workflow.
 # new: GitHub repo (nix dev shell, release-per-merge workflow) plus a sandboxed machine running an agent.
 # reset: rebuild the machine from the existing repo, optionally at a commit or tag. retire: remove the machine and the agent's access.
+# destroy: retire plus delete the repo. A failed new rolls back the repo and box. base: build box-base and apply box/pstack-config; save-pstack captures it.
 # Box layer: box/sandbox new|exec|rm|ls <name>. The box is logged in to gh as the agent account.
 # Config: ~/.config/agent-boxes/config sets OWNER (GitHub user owning repos) and AGENT (agent GitHub username).
 set -euo pipefail
@@ -15,15 +16,21 @@ usage() {
 Usage: box [--dry-run] new NAME [--python VER] [--node VER] [--packages "a b"] [--prompt TEXT]
        box [--dry-run] reset NAME [--ref COMMIT|TAG]
        box [--dry-run] retire NAME
+       box [--dry-run] destroy NAME
        box [--dry-run] rm NAME
        box [--dry-run] versions NAME
+       box [--dry-run] base
+       box [--dry-run] save-pstack
        box ls
 
 new      create the repo and a box
 reset    delete the box and make a fresh one from the existing repo (at --ref if given)
 retire   delete the box and remove the agent's access to the repo
+destroy  retire, then delete the repo (asks first)
 rm       delete the box only; the repo and access stay
 versions list the repo's releases (one per merge to main)
+base     (re)build box-base and apply box/pstack-config to it
+save-pstack  copy the pstack config from box-base into box/pstack-config
 
 --dry-run prints every command instead of running it.
 EOF
@@ -32,19 +39,42 @@ die() { echo "box: $*" >&2; exit 1; }
 
 # Run a command, or just print it under --dry-run.
 run() {
-  if $dry; then printf '+'; printf ' %q' "$@"; echo; else "$@"; fi
+  if $dry; then { printf '+'; printf ' %q' "$@"; echo; } >&2; else "$@"; fi
 }
 # Run a command whose stdin is a heredoc: print the heredoc too under --dry-run.
 run_in() {
-  if $dry; then printf '+'; printf ' %q' "$@"; echo ' <<STDIN'; cat; echo STDIN; else "$@"; fi
+  if $dry; then { printf '+'; printf ' %q' "$@"; echo ' <<STDIN'; cat; echo STDIN; } >&2; else "$@"; fi
 }
 
 [ "${1:-}" != --dry-run ] || { dry=true; shift; }
 cmd="${1:-}"; shift || true
 
+# Files /pstack:setup-pstack writes, relative to ~/.claude.
+pstack_files=(rules/pstack-models.md)
+pstack_dir="$(dirname "$sandbox")/pstack-config"
 case "$cmd" in
   ls) run "$sandbox" ls; exit ;;
-  new | reset | retire | rm | versions) ;;
+  base)
+    run "$sandbox" base
+    if [ ! -d "$pstack_dir" ]; then
+      echo "box: no $pstack_dir; pstack not configured in the base (run /pstack:setup-pstack in box-base, then: box save-pstack)" >&2
+    elif $dry; then echo "+ tar -C $pstack_dir -cf - . | orb -m box-base tar -C ~/.claude -xf -  (then orb stop box-base)" >&2
+    else
+      orb start box-base
+      tar -C "$pstack_dir" -cf - . | orb -m box-base bash -c 'mkdir -p ~/.claude && tar -C ~/.claude -xf -'
+      orb stop box-base
+    fi
+    exit ;;
+  save-pstack)
+    if $dry; then echo "+ orb -m box-base tar -C ~/.claude -cf - ${pstack_files[*]} | tar -C $pstack_dir -xf -" >&2; exit; fi
+    mkdir -p "$pstack_dir"
+    orb start box-base
+    orb -m box-base bash -c 'cd ~/.claude && tar -cf - "$@"' _ "${pstack_files[@]}" | tar -C "$pstack_dir" -xf - ||
+      { orb stop box-base; die "could not read ${pstack_files[*]} from box-base; run /pstack:setup-pstack there first"; }
+    orb stop box-base
+    echo "saved ${pstack_files[*]} to $pstack_dir"
+    exit ;;
+  new | reset | retire | destroy | rm | versions) ;;
   -h | --help | "") usage; exit ;;
   *) usage >&2; die "unknown command: $cmd" ;;
 esac
@@ -91,6 +121,8 @@ if ! $dry; then
   [ "$(gh api user --jq .login 2>/dev/null)" = "$owner" ] || die "gh is not logged in as $owner; run: gh auth login"
   if [ "$cmd" = new ]; then
     ! gh repo view "$owner/$name" >/dev/null 2>&1 || die "repo $owner/$name already exists"
+    # A failed new removes the box named $name, so never start over an existing one.
+    ! "$sandbox" ls | awk -v n="$name" '$1 == n { f=1 } END { exit !f }' || die "box $name already exists"
   elif [ "$cmd" != rm ]; then
     gh repo view "$owner/$name" >/dev/null 2>&1 || die "repo $owner/$name does not exist"
   fi
@@ -102,6 +134,15 @@ machine_remove() {
   id="$(herdr machine list --json | jq -r --arg l "$name" '[.. | objects | select(.label? == $l) | .id][0] // empty')"
   if [ -n "$id" ]; then run herdr machine remove "$id" || echo "box: herdr machine remove failed, continuing" >&2
   else echo "box: no herdr machine labeled $name, continuing" >&2; fi
+}
+
+# delete_repo scope is not kept: add it for the delete, drop it again after.
+delete_repo() {
+  local rc=0
+  if $dry || ! gh auth status 2>&1 | grep -q delete_repo; then run gh auth refresh -s delete_repo; fi
+  run gh repo delete "$owner/$name" --yes || rc=$?
+  run gh auth refresh -r delete_repo
+  return $rc
 }
 
 # Create the box, connect herdr, clone the repo and start the agent. $1 = accept the collaborator invite (new only).
@@ -139,7 +180,7 @@ if [ "$accept" = 1 ]; then
     sleep 2
   done
   [ -n "\$id" ] || { echo "box: no invitation to $owner/$name found" >&2; exit 1; }
-  gh api -X PATCH "user/repository_invitations/\$id"
+  gh api -X PATCH "user/repository_invitations/\$id" >/dev/null
 fi
 gh repo clone $owner/$name ~/$name
 cd ~/$name
@@ -173,7 +214,17 @@ case "$cmd" in
   retire)
     machine_remove
     run "$sandbox" rm "$name"
-    run gh api -X DELETE "$repo/collaborators/$agent"
+    run gh api -X DELETE "$repo/collaborators/$agent" >/dev/null
+    exit ;;
+  destroy)
+    if ! $dry; then
+      read -r -p "Delete box $name AND repo $owner/$name permanently? [y/N] " ans
+      [ "$ans" = y ] || exit 0
+    fi
+    machine_remove
+    run "$sandbox" rm "$name" || echo "box: no box $name, continuing" >&2
+    run gh api -X DELETE "$repo/collaborators/$agent" >/dev/null || echo "box: agent was not a collaborator, continuing" >&2
+    delete_repo
     exit ;;
   versions) run gh release list -R "$owner/$name" --json tagName,name,publishedAt --template '{{range .}}{{.tagName}}{{"\t"}}{{.name}}{{"\t"}}{{.publishedAt}}{{"\n"}}{{end}}'; exit ;;
   reset)
@@ -186,7 +237,22 @@ esac
 
 # --- new, 1. Mac side: repo contents ---
 dir="$(mktemp -d "${TMPDIR:-/tmp}/box.XXXXXX")"
-$dry || trap 'rm -rf "$dir"' EXIT
+armed=false
+# Once the repo exists, any failure removes the box, the herdr entry and the repo so the name can be rerun.
+cleanup() {
+  local rc=$?
+  trap - EXIT
+  if $armed && [ $rc -ne 0 ]; then
+    echo "box: new failed, rolling back $name" >&2
+    armed=false
+    machine_remove || true
+    "$sandbox" rm "$name" || true
+    delete_repo || echo "box: could not delete $owner/$name; run: box destroy $name" >&2
+  fi
+  $dry || rm -rf "$dir"
+  exit $rc
+}
+trap cleanup EXIT
 cd "$dir"
 git init -q -b main
 
@@ -258,6 +324,7 @@ git commit -q -m "Initial commit"
 
 echo "==> Creating GitHub repo $owner/$name"
 run gh repo create "$owner/$name" --public --source . --remote origin
+armed=true
 push=(git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push -q origin main)
 if $dry; then run "${push[@]}"; else
   log="$(mktemp "${TMPDIR:-/tmp}/box-push.XXXXXX")"
@@ -265,18 +332,15 @@ if $dry; then run "${push[@]}"; else
     "${push[@]}" 2>"$log" && break
     cat "$log" >&2
     if ! grep -q -E 'Internal Server Error|error: 5[0-9][0-9]|HTTP 5[0-9][0-9]|returned error: 5[0-9][0-9]' "$log" || [ "$attempt" = 3 ]; then
-      trap - EXIT # keep the local repo so the push can be resumed
-      die "initial push failed. Nothing was deleted: $owner/$name exists on GitHub and the repo is kept in $dir.
-Resume: cd $dir && git push origin main
-That is only the first step; the rest (settings, ruleset, collaborator, box) have not run. To start over: gh repo delete $owner/$name --yes && box new $name"
+      die "initial push failed"
     fi
     echo "box: GitHub 5xx on push (attempt $attempt/3), retrying in 5s" >&2
     sleep 5
   done
   rm -f "$log"
 fi
-run gh api -X PATCH "$repo" -F delete_branch_on_merge=true
-run_in gh api -X POST "$repo/rulesets" --input - <<'EOF'
+run gh api -X PATCH "$repo" -F delete_branch_on_merge=true >/dev/null
+run_in gh api -X POST "$repo/rulesets" --input - >/dev/null <<'EOF'
 {
   "name": "main",
   "target": "branch",
@@ -289,9 +353,10 @@ run_in gh api -X POST "$repo/rulesets" --input - <<'EOF'
   ]
 }
 EOF
-run gh api -X PUT "$repo/collaborators/$agent" -f permission=push
+run gh api -X PUT "$repo/collaborators/$agent" -f permission=push >/dev/null
 
 # --- new, 2. Box side ---
 provision 1
+armed=false
 
 echo "box $name ready: github.com/$owner/$name"
