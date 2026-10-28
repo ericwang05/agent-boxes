@@ -11,6 +11,8 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends \
     git curl ca-certificates jq ripgrep less procps unzip nftables sudo gh iproute2
+# nodejs is for Claude plugins: several (e.g. ponytail, i-have-adhd) run node in their hooks, and the Claude install is a standalone binary with no node.
+apt-get install -y --no-install-recommends nodejs
 
 # --- Determinate Nix: multi-user daemon, so the sandbox user needs no sudo ---
 curl -fsSL https://install.determinate.systems/nix | sh -s -- install linux --no-confirm

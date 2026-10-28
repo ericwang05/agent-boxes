@@ -85,6 +85,8 @@ Everything Claude-related inside boxes comes from **`box/claude/`**, which is co
 
 Change a file, commit, run `box base`, and new boxes get it. **Never put tokens here:** this repo is public, and `box base` refuses to run if it finds anything that looks like one.
 
+The base also installs `nodejs` (see `box/setup.sh`) because several plugins run node in their hooks and Claude Code itself ships without it.
+
 ## Layout
 
 | Path | What |

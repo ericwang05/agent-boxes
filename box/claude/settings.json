@@ -1,8 +1,14 @@
 {
   "permissions": { "defaultMode": "bypassPermissions" },
   "skipDangerousModePermissionPrompt": true,
-  "enabledPlugins": { "pstack@cursor-plugins": true },
+  "enabledPlugins": {
+    "pstack@cursor-plugins": true,
+    "eli5@claude-community": true,
+    "i-have-adhd@i-have-adhd": true
+  },
   "extraKnownMarketplaces": {
-    "cursor-plugins": { "source": { "source": "github", "repo": "cursor/plugins" } }
+    "cursor-plugins": { "source": { "source": "github", "repo": "cursor/plugins" } },
+    "claude-community": { "source": { "source": "github", "repo": "anthropics/claude-plugins-community" } },
+    "i-have-adhd": { "source": { "source": "github", "repo": "ayghri/i-have-adhd" } }
   }
 }
