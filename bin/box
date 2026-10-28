@@ -222,7 +222,14 @@ for _ in $(seq 10); do
   run ssh -o BatchMode=yes "$name@orb" true && { ssh_ok=true; break; }
   sleep 1
 done
-$ssh_ok || die "cannot ssh $name@orb non-interactively; make sure ~/.ssh/config has 'Include ~/.orbstack/ssh/config' (or a 'Host orb' entry for OrbStack)"
+$ssh_ok || die "cannot ssh $name@orb non-interactively; add this to ~/.ssh/config:
+Host orb
+  HostName 127.0.0.1
+  Port 32222
+  User default
+  IdentityFile ~/.orbstack/ssh/id_ed25519
+  IdentitiesOnly yes
+  ForwardAgent no"
 # Before any pane exists: machine add starts the box's herdr server and may restart it, killing panes.
 # No tty on stdin keeps it non-interactive; a fresh box has herdr installed and no server, so nothing to confirm.
 run herdr machine add "ssh://$name@orb" --label "$name" --remote-session default </dev/null
