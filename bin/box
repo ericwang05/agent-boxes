@@ -314,8 +314,6 @@ gh api -X PATCH "/user/repository_invitations/\$id"
 # GH_TOKEN alone is not enough: herdr panes may not source /etc/profile.d. gh refuses to store a token while GH_TOKEN is set.
 printf %s "\$GH_TOKEN" | env -u GH_TOKEN gh auth login --with-token
 gh auth setup-git
-git config --global user.name "$agent"
-git config --global user.email "$agent@users.noreply.github.com"
 gh repo clone $owner/$name ~/$name
 cd ~/$name
 # Pre-accept folder trust and the bypass prompt so the agent never blocks on a dialog.
