@@ -226,7 +226,23 @@ git commit -q -m "Initial commit"
 echo "==> Creating GitHub repo $owner/$name"
 repo="repos/$owner/$name"
 run gh repo create "$owner/$name" --public --source . --remote origin
-run git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push -q origin main
+push=(git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push -q origin main)
+if $dry; then run "${push[@]}"; else
+  log="$(mktemp "${TMPDIR:-/tmp}/box-push.XXXXXX")"
+  for attempt in 1 2 3; do
+    "${push[@]}" 2>"$log" && break
+    cat "$log" >&2
+    if ! grep -q -E 'Internal Server Error|error: 5[0-9][0-9]|HTTP 5[0-9][0-9]|returned error: 5[0-9][0-9]' "$log" || [ "$attempt" = 3 ]; then
+      trap - EXIT # keep the local repo so the push can be resumed
+      die "initial push failed. Nothing was deleted: $owner/$name exists on GitHub and the repo is kept in $dir.
+Resume: cd $dir && git push origin main
+That is only the first step; the rest (settings, ruleset, collaborator, box) have not run. To start over: gh repo delete $owner/$name --yes && box new $name"
+    fi
+    echo "box: GitHub 5xx on push (attempt $attempt/3), retrying in 5s" >&2
+    sleep 5
+  done
+  rm -f "$log"
+fi
 run gh api -X PATCH "$repo" -F allow_auto_merge=true
 run gh api -X PUT "$repo/actions/permissions/workflow" -F can_approve_pull_request_reviews=true
 run_in gh api -X POST "$repo/rulesets" --input - <<'EOF'
