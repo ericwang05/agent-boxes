@@ -1,102 +1,121 @@
 # Playbook
 
-What to do, situation by situation. Commands run on the Mac unless they say "inside the box". Setup and design are in the [README](README.md).
+Find what you're trying to do, then run what it says. Commands run on your Mac unless marked **(in the box)**. Setup and design are in the [README](README.md).
 
-## Start a project
+**Jump to:**
+- [Everyday](#everyday): [start a project](#start-a-project) · [work in a box](#work-in-a-box) · [add tools](#add-tools-to-a-project) · [finish a project](#finish-a-project)
+- [When something goes wrong](#when-something-goes-wrong): [agent stuck](#the-agent-is-stuck) · [bad code on main](#bad-code-landed-on-main) · [suspected compromise](#you-suspect-a-box-was-compromised) · [`box new` failed](#box-new-failed) · [stop everything](#stop-everything)
+- [Changing the setup](#changing-the-setup): [add a plugin](#add-or-change-a-claude-plugin-or-setting) · [rebuild the base](#rebuild-the-base)
+- [Maintenance calendar](#maintenance-calendar) · [Error lookup](#error-lookup) · [Check isolation by hand](#check-isolation-by-hand)
 
+---
+
+## Everyday
+
+### Start a project
 ```sh
 box new myapp
 ```
+Open herdr, press `prefix+w`, pick `myapp`, then run `claude` in its workspace. The first instruction is yours. To start pstack, begin your message with `/pstack:poteto-mode`.
 
-1. In herdr, press `prefix+w` and pick `myapp`. The workspace is open in the repo, with no agent running.
-2. Start Claude yourself: run `claude`, then give it its first instruction.
-3. Want to check the steps first? Run `box --dry-run new myapp`.
+### Work in a box
+- **herdr:** every box is in the sidebar, and `prefix+w` switches between them. The agent list shows who's working, idle or waiting on you.
+- **A plain shell:** `ssh myapp@orb`.
+- **One-off commands that need the project's tools:** `direnv exec . <cmd>` **(in the box, inside the repo)**.
+- **Results:** the repo's commits and pull requests on GitHub.
 
-The repo is public, so don't put secrets in it.
+### Add tools to a project
+Tell the agent "add `<tool>` to `flake.nix`". For language packages, it uses that language's own tool, such as `uv`, `npm` or `cargo`. The shell reloads by itself.
 
-## Watch and talk to agents
+### Finish a project
 
-- **herdr:** the sidebar lists every box. The agent list shows each agent as working, idle or waiting. `prefix+w` switches boxes.
-- **GitHub:** the repo's Pull requests and commit history.
-- **A shell inside a box:** `ssh myapp@orb`, or `orb -m myapp` for quick admin commands. The dev shell loads in interactive shells. For one-off commands, use `direnv exec . <cmd>` inside the repo.
+| You want | Run |
+| --- | --- |
+| Keep the repo, revoke the agent | `box retire myapp` |
+| Delete everything, repo included | `box destroy myapp` |
 
-## Add tools to a project
+---
 
-Tell the agent: "add `<tool>` to the `packages` list in `flake.nix`". direnv reloads the shell automatically.
+## When something goes wrong
 
-## Add a Claude plugin to every new box
+### The agent is stuck
+1. Talk to it in its herdr pane.
+2. Still stuck? Get a fresh box with the same repo: `box reset myapp`.
 
-Edit `box/claude/settings.json` (add it to `enabledPlugins`, and its marketplace to `extraKnownMarketplaces`), then run `box base`. New boxes get it; existing boxes keep their old config until `box reset`.
+### Bad code landed on main
+- **Undo specific commits:** ask an agent to "revert commits `<sha>`…`<sha>` in one PR."
+- **Jump back to a good commit.** Find it in the repo's commit history on GitHub, or with `git log`, then:
+  ```sh
+  git clone https://github.com/<owner>/myapp /tmp/fix && cd /tmp/fix
+  git push --force origin <good-commit>:main
+  ```
+  You're the only one the rules allow to do this. In that clone, run `git push` and nothing else.
+- **Fresh box from that commit:** `box reset myapp --ref <good-commit>`.
 
-## Find a known-good commit
-
-Use `git log` in a clone, or the repo's commit history on GitHub, and note the commit id.
-
-## The agent is stuck or confused
-
-1. Talk to it in its pane.
-2. If that doesn't help, reset the box. The code stays on GitHub: `box reset myapp`.
-
-## Bad code landed on `main`
-
-**Undo specific changes:** tell any agent, "revert commits `<sha>`…`<sha>` in one PR."
-
-**Jump back to a known-good commit:** you're the repo admin, so the ruleset lets you do this.
-```sh
-git clone https://github.com/<owner>/myapp /tmp/fix && cd /tmp/fix
-git log --oneline
-git push --force origin <good-commit>:main
-```
-Only `git push` in that clone. Don't run anything else from an agent-written repo on the Mac.
-
-## You suspect a box or agent went rogue
-
-1. **Stop it now:** `orb stop myapp`.
-2. **Revoke and replace both tokens.** That's what stops anything it copied out:
-   - **GitHub:** sign in as the agent account → Settings → Developer settings → Tokens (classic). Revoke the old token, then create a new one with `public_repo` and `repo:invite`, and save it to `~/agent-boxes/.agent-token`.
+### You suspect a box was compromised
+1. **Stop it:** `orb stop myapp`.
+2. **Revoke and replace both tokens.** That's what cuts off anything it copied:
+   - **GitHub:** sign in as the agent account → Settings → Developer settings → Tokens (classic) → revoke. Create a new token (`public_repo` and `repo:invite`) and save it to `~/agent-boxes/.agent-token`.
    - **Claude:** revoke the old token in your Claude account settings, then run `claude setup-token` and save the new one to `~/agent-boxes/.claude-token`.
-3. **Check what it touched:** recent commits and PRs here, in your other box projects (the agent account can reach those too), and on the agent account's own profile.
-4. **Restore `main`** if needed (see above).
-5. **Start fresh from a safe commit:** `box reset myapp --ref <good-commit>`.
+3. **Check what it touched:** recent commits and pull requests in this project, your other box projects, and the agent account's profile.
+4. **Fix `main`** if needed (see above), then `box reset myapp --ref <good-commit>`.
 
-## A project is finished
+### `box new` failed
+It cleans up after itself, so just read the error and run it again. To keep a failed box for debugging, use `BOX_KEEP=1 box new myapp`.
 
-- **`box retire myapp`:** keeps the repo and revokes the agent's access.
-- **`box destroy myapp`:** deletes everything, including the repo.
-
-## Stop everything
-
+### Stop everything
 - **One box:** `orb stop <name>`
 - **All boxes:** quit OrbStack
 
-## Routine maintenance
+---
 
-| When | What |
+## Changing the setup
+
+### Add or change a Claude plugin or setting
+1. Edit `box/claude/settings.json`: add the plugin under `enabledPlugins` and its marketplace under `extraKnownMarketplaces`. Put rule files in `box/claude/rules/`.
+2. Commit, then run `box base`.
+3. New boxes have it. For an existing box, run `box reset <name>`.
+
+To save a plugin's own settings, such as pstack's models, run its setup once in the base (`ssh box-base@orb`, then `claude`), then copy the file it writes into `box/claude/rules/`.
+
+### Rebuild the base
+```sh
+box base
+```
+This picks up updates to Nix, herdr, Claude Code and your `box/claude/`. Existing boxes keep their old copy until you `box reset` them.
+
+---
+
+## Maintenance calendar
+
+| When | Do |
 | --- | --- |
-| Every 90 days | **The agent token expires.** Make a new one (`public_repo` + `repo:invite`), save it to `.agent-token`, and `box reset` active projects |
-| Monthly | **Rebuild the base** for updates: `box base` |
-| After editing `box/claude/` | Run `box base`, then `box reset` active projects to pick it up |
-| Overnight runs | **Keep the Mac plugged in and awake,** since boxes pause when it sleeps |
-| Weekly | **Check Claude plan usage.** All boxes share it |
+| Monthly | `box base` |
+| Every 90 days | The agent token expires. Make a new one, save it to `.agent-token`, then `box reset` active projects |
+| Before overnight runs | Keep the Mac plugged in and awake |
+| Weekly | Check your Claude plan usage, which all boxes share |
+| When a project ends | `box retire` or `box destroy` |
 
-## Common errors
+---
 
-| Error | Fix |
+## Error lookup
+
+| You see | Fix |
 | --- | --- |
-| `dial: no such file or directory` | OrbStack isn't running: `open -a OrbStack`, wait, retry |
+| `dial: no such file or directory` | OrbStack isn't running: `open -a OrbStack`, then retry |
 | `Could not resolve hostname orb` | Add the `Host orb` entry from the README to `~/.ssh/config` |
-| SSH works but the box looks empty or `sudo` works | You hit a box name that doesn't exist, and OrbStack fell back to its default machine. Check `orb list` |
-| `box new` fails partway | It rolls back by itself. Read the error and rerun. Use `BOX_KEEP=1 box new …` to keep the box for debugging |
-| `repo … already exists` | Use `box reset <name>` for an existing project, or `box destroy <name>` first |
-| `agent cannot push … 403` | The agent's invite wasn't accepted. `box new` matches invites by repo ID and clears stale ones, so this is rare. Check the token has `repo:invite` |
-| Config error like `line 2: Wang: command not found` | Quote values with spaces in `~/.config/agent-boxes/config` |
+| A box looks empty, or `sudo` works | You typed a box name that doesn't exist, and OrbStack connected you to its default machine instead. Check `orb list` |
+| `repo … already exists` | Existing project: `box reset <name>`. Starting over: `box destroy <name>` |
+| `agent cannot push … 403` | Check the agent token has `repo:invite`, then `box destroy` and `box new` |
+| `line 2: Wang: command not found` | Quote values with spaces in `~/.config/agent-boxes/config` |
+| `claude: command not found` in a box | Open a login shell with `ssh <name>@orb`, or run `box base` |
+| A paste seems to do nothing | Token prompts hide what you type. Press Enter |
 | `gh` asks "Authenticate Git with your GitHub credentials?" | Answer yes. It only affects git on your Mac |
-| `claude: command not found` in a box | Use a login shell (`ssh <name>@orb`), or rebuild with `box base` |
-| Paste looks like it did nothing | Token and login prompts hide input. Press Enter |
+
+---
 
 ## Check isolation by hand
-
-Inside any box:
+**(in the box)**
 ```sh
 curl -sS -o /dev/null -w "internet: %{http_code}\n" https://github.com
 curl -m 3 -s http://host.orb.internal >/dev/null && echo "mac: REACHABLE" || echo "mac: blocked"

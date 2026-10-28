@@ -1,88 +1,67 @@
 # agent-boxes
 
-> **Day-to-day use and troubleshooting: see [PLAYBOOK.md](PLAYBOOK.md).**
+**One command gives Claude Code its own isolated Linux box, a GitHub repo and a Nix dev shell. I open it in herdr and start working.**
 
-One command gives a Claude Code agent its own disposable Linux machine, a GitHub repo and a Nix dev shell, walled off from my Mac. I watch and talk to every agent from one herdr window.
+> 📘 **How do I...? → [PLAYBOOK.md](PLAYBOOK.md)** covers starting projects, fixing problems and changing the setup.
 
 ```sh
-box new myapp
+box new myapp      # repo + box + herdr workspace, ready in about a minute
 ```
-
-**Scope:** this repo builds the environment only: the repo, an empty dev shell, the isolated machine and the herdr connection. It starts no agent and sets no agent behavior beyond the Claude Code config you put in `box/claude/`. Workflow rules, the definition of done and any reviewer or judge agents belong to each project or to separate skills. It's built for Claude Code only.
-
-## What `box new` does
-
-1. **Repo.** It creates `github.com/<owner>/<name>` (public) with:
-   - an empty Nix flake dev shell for `aarch64-linux` and `x86_64-linux` (`flake.nix`, `flake.lock`, `.envrc`) and a `.gitignore`
-   - a minimal ruleset that blocks force-pushes and deletion of `main`, so history can't be erased; the repo admin can bypass it
-2. **Agent access.** It invites the agent's GitHub account as a write collaborator.
-3. **Box.** It clones the prebuilt OrbStack machine `box-base` and sets up the clone:
-   - isolates it, with CPU and memory limits
-   - installs the firewall, removes `sudo`, then checks isolation (all checks are fatal): the internet must work; the host, the home network and `sudo` must be blocked; no host files may be mounted
-   - injects the two tokens, only after the checks pass
-4. **Inside the box.** It accepts the invite, matched by repo ID, confirms the agent can push, clones the repo, runs `direnv allow`, and pre-accepts Claude Code's folder-trust prompt.
-5. **herdr.** It registers the box as a herdr machine and creates one workspace at `~/<name>`. No agent is started; open Claude Code in that workspace yourself.
-
-If any step fails after the repo is created, `box new` rolls back: it removes the box, the herdr entry and the repo. Set `BOX_KEEP=1` to keep everything for debugging instead.
 
 ## Commands
 
-| Command | What it does |
+| Command | Use it when |
 | --- | --- |
-| `box new <name>` | new repo + box + herdr workspace |
-| `box reset <name> [--ref <commit>]` | fresh box for an **existing** repo, optionally at a known-good commit |
-| `box rm <name>` | delete the box only |
-| `box retire <name>` | project finished: delete the box and herdr entry, and revoke the agent's access. The repo stays |
-| `box destroy <name>` | delete everything, **including the repo** (asks to confirm) |
-| `box ls` | list boxes |
-| `box base` | rebuild `box-base` and apply `box/claude/` to it |
-| `box --dry-run <command>` | print every step without running anything |
+| `box new <name>` | starting a project |
+| `box reset <name> [--ref <commit>]` | a box is broken or confused: fresh box, same repo (optionally from an older commit) |
+| `box rm <name>` | you want the box gone, but the repo and access kept |
+| `box retire <name>` | a project is finished: box gone, agent's access revoked, repo kept |
+| `box destroy <name>` | throwing a project away entirely, repo included (asks first) |
+| `box ls` | listing boxes |
+| `box base` | rebuilding the base image (monthly, or after changing `box/claude/`) |
+| `box --dry-run <command>` | previewing every step without doing anything |
 
-## Isolation model
+## What you get
 
-| From inside a box | Allowed? | Enforced by |
-| --- | --- | --- |
-| Internet (IPv4) | yes | the box's own gateway and DNS |
-| My Mac | no | OrbStack `--isolated`, plus the firewall |
-| My home network | no | nftables firewall (root-owned, regenerated at boot) |
-| Other boxes | no (best effort) | nftables rejects OrbStack's internal ranges |
-| IPv6 | no | nftables |
-| `sudo` / undoing the firewall | no | sudo grant removed at creation |
-| My files, SSH keys, SSH agent | no | no mounts (checked at creation), `ForwardAgent no` |
+- **A public GitHub repo** with an empty Nix flake (`flake.nix`, `.envrc`, `flake.lock`). History is protected: nobody but you can force-push or delete `main`.
+- **An isolated box:** an OrbStack Linux machine with Claude Code, herdr and Nix, plus your Claude settings and plugins from `box/claude/`.
+- **A herdr workspace** already in the repo. Run `claude` there and you're working. Nothing starts on its own.
 
-**Credentials in a box: exactly two.**
-- **The agent GitHub account's classic token,** scopes `public_repo` and `repo:invite`. It can push only to repos the account was invited to, can accept invites, and can't change CI.
-- **A Claude Code token** from `claude setup-token`, which can make model requests and nothing else.
+That's all. It sets up the environment only. How agents work and what "done" means are decided per project.
 
-The base image holds no credentials. Commits are authored as me (so they count toward my contribution graph) and pushed by the agent account. Inside a box, the agent adds tools by editing the `packages` list in `flake.nix`. Nix builds in its own sandbox, and the agent can't add untrusted binary caches.
+## Safety in one table
 
-## Claude config
-
-`box/claude/` is the Claude Code config every box starts with. `box base` copies it into the base's `~/.claude`:
-
-| Path | What |
+| From inside a box | Allowed? |
 | --- | --- |
-| `box/claude/settings.json` | merged into the base's `settings.json` with `jq`. Holds permission defaults, `enabledPlugins` and `extraKnownMarketplaces` |
-| `box/claude/rules/` | copied to `~/.claude/rules/` |
-| `box/claude/CLAUDE.md` | optional; copied to `~/.claude/CLAUDE.md` |
+| The internet | ✅ |
+| Your Mac, its files, SSH keys | ❌ |
+| Your home network | ❌ |
+| Other boxes | ❌ (best effort) |
+| `sudo` / undoing these rules | ❌ |
 
-For every key in `enabledPlugins`, `box base` runs `claude plugin marketplace add` for its marketplace (looked up in `extraKnownMarketplaces`) and `claude plugin install <plugin>`. To add a plugin, edit `box/claude/settings.json`, then run `box base`. Never put tokens in `box/claude/`; `box base` refuses if it finds one.
+These are checked automatically every time a box is created. If any check fails, the box isn't created.
+
+**Credentials in a box: only two.**
+- **The agent GitHub account's token,** scopes `public_repo` and `repo:invite`. It can push only to repos you've given it.
+- **A Claude Code token** that can only make model requests.
+
+The base image itself holds none. Commits are authored as you and pushed by the agent account.
 
 ## One-time setup
 
-1. **Install the Mac side.** You need OrbStack (`brew install orbstack`; choose Linux), herdr and `gh`, logged in as the repo owner. Give `gh` the delete permission once with `gh auth refresh -s delete_repo`, so `destroy` and rollback work without extra logins.
-2. **Create the agent account.** Make a separate GitHub account and give it a classic token with **`public_repo` and `repo:invite` only** and a 90-day expiry. Save it to `~/agent-boxes/.agent-token` (`chmod 600`).
-3. **Create the Claude token.** Run `claude setup-token` and save the result to `~/agent-boxes/.claude-token` (`chmod 600`).
-4. **Write the config file** at `~/.config/agent-boxes/config`. It's read as shell code, so quote values that contain spaces:
+1. **Install:** OrbStack (`brew install orbstack`, then choose Linux), herdr and `gh`. Log `gh` in as yourself, then run `gh auth refresh -s delete_repo`.
+2. **Agent account:** a separate GitHub account with a classic token scoped `public_repo` and `repo:invite`, with a 90-day expiry. Save it to `~/agent-boxes/.agent-token` and `chmod 600` it.
+3. **Claude token:** run `claude setup-token`, save the result to `~/agent-boxes/.claude-token` and `chmod 600` it.
+4. **Config file** `~/.config/agent-boxes/config`. Quote any value that contains a space:
    ```sh
-   OWNER="<github user>"
+   OWNER="<your github user>"
    GIT_NAME="<your name>"
    GIT_EMAIL="<id>+<user>@users.noreply.github.com"
    AGENT="<agent github user>"
    BOX_CPUS=4
    BOX_MEMORY_MIB=8192
    ```
-5. **Add the SSH entry** to `~/.ssh/config`:
+5. **SSH entry** in `~/.ssh/config`:
    ```
    Host orb
      HostName 127.0.0.1
@@ -92,24 +71,33 @@ For every key in `enabledPlugins`, `box base` runs `claude plugin marketplace ad
      IdentitiesOnly yes
      ForwardAgent no
    ```
-6. **Build the base:** `box base`. It also applies `box/claude/`.
-7. **Put `box` on your PATH:** `ln -s ~/agent-boxes/bin/box ~/.local/bin/box`
+6. **Build and link:** run `box base`, then `ln -s ~/agent-boxes/bin/box ~/.local/bin/box`.
+
+## Customizing boxes
+
+Everything Claude-related inside boxes comes from **`box/claude/`**, which is copied into the base by `box base`:
+
+| File | What it controls |
+| --- | --- |
+| `box/claude/settings.json` | plugins (`enabledPlugins` plus their `extraKnownMarketplaces`), permission mode, other Claude settings |
+| `box/claude/rules/` | rule files, for example pstack's model choices |
+| `box/claude/CLAUDE.md` | optional instructions for every box agent |
+
+Change a file, commit, run `box base`, and new boxes get it. **Never put tokens here:** this repo is public, and `box base` refuses to run if it finds anything that looks like one.
 
 ## Layout
 
 | Path | What |
 | --- | --- |
-| `bin/box` | Mac-side CLI: repo, invite, box lifecycle, herdr, Claude config |
-| `box/sandbox` | box layer: `base`, `new`, `exec`, `rm`, `ls` |
-| `box/setup.sh` | provisions `box-base`: Nix, direnv, herdr, Claude Code, firewall |
-| `box/claude/` | Claude Code config applied by `box base` |
+| `bin/box` | the `box` command |
+| `box/sandbox` | creates, checks and deletes machines |
+| `box/setup.sh` | what the base image installs |
+| `box/claude/` | Claude settings and plugins for every box |
 
-## Safety rules
+## Rules to keep
 
 - **Never set `ForwardAgent yes`** for `orb`.
-- **Never run agent-written code on the Mac.** Don't run git hooks, `.envrc`, `npm install` or similar on the Mac from a repo an agent wrote. Use a box.
-- **No agent works unattended in this repo.** It's the factory that builds every box.
+- **Never run agent-written code on your Mac.** That includes git hooks, `.envrc` and `npm install`. Use a box.
+- **No agent works unattended in this repo.** It builds every box.
 
-## Credits
-
-The isolation approach was inspired by [phasesoftware/sandbox](https://github.com/phasesoftware/sandbox). This code was written separately.
+Inspired by [phasesoftware/sandbox](https://github.com/phasesoftware/sandbox). MIT licensed.
