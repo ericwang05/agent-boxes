@@ -172,8 +172,13 @@ Host orb
 set -euo pipefail
 [ -n "\${GH_TOKEN:-}" ] || { echo "box: GH_TOKEN missing in the box" >&2; exit 1; }
 if [ "$accept" = 1 ]; then
+  # Invitations left by deleted repos of the same name carry other repo ids: decline them, accept only ours.
   for _ in \$(seq 30); do
-    id="\$(gh api user/repository_invitations --paginate --jq 'first(.[] | select(.repository.full_name == "$owner/$name") | .id) // empty')"
+    invs="\$(gh api user/repository_invitations --paginate)"
+    for stale in \$(jq -r '.[] | select(.repository.full_name == "$owner/$name" and .repository.id != $repo_id) | .id' <<<"\$invs"); do
+      gh api -X DELETE "user/repository_invitations/\$stale" >/dev/null || true
+    done
+    id="\$(jq -r '.[] | select(.repository.id == $repo_id) | .id' <<<"\$invs" | head -n1)"
     [ -z "\$id" ] || break
     sleep 2
   done
@@ -339,6 +344,9 @@ git commit -q -m "Initial commit"
 echo "==> Creating GitHub repo $owner/$name"
 run gh repo create "$owner/$name" --public --source . --remote origin
 armed=true
+# Same-name invitations from deleted repos exist, so the box accepts by numeric id.
+repo_id=0
+$dry || repo_id="$(gh api "$repo" --jq .id)"
 push=(git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push -q origin main)
 if $dry; then run "${push[@]}"; else
   log="$(mktemp "${TMPDIR:-/tmp}/box-push.XXXXXX")"
