@@ -1,0 +1,8 @@
+{
+  "permissions": { "defaultMode": "bypassPermissions" },
+  "skipDangerousModePermissionPrompt": true,
+  "enabledPlugins": { "pstack@cursor-plugins": true },
+  "extraKnownMarketplaces": {
+    "cursor-plugins": { "source": { "source": "github", "repo": "cursor/plugins" } }
+  }
+}

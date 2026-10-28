@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# box new|reset|retire|destroy|rm|versions|base|save-pstack|ls: the environment for a project, not its workflow.
-# new: GitHub repo (nix dev shell, release-per-merge workflow) plus a sandboxed machine running an agent.
-# reset: rebuild the machine from the existing repo, optionally at a commit or tag. retire: remove the machine and the agent's access.
-# destroy: retire plus delete the repo. A failed new rolls back the repo and box. base: build box-base and apply box/pstack-config; save-pstack captures it.
+# box new|reset|retire|destroy|rm|base|ls: the environment for a project, not its workflow.
+# new: GitHub repo (empty nix dev shell) plus a sandboxed machine and a herdr workspace; it never starts an agent.
+# reset: rebuild the machine from the existing repo, optionally at a commit. retire: remove the machine and the agent's access.
+# destroy: retire plus delete the repo. A failed new rolls back the repo and box. base: build box-base and apply box/claude.
 # Box layer: box/sandbox new|exec|rm|ls <name>. The box is logged in to gh as the agent account.
 # Config: ~/.config/agent-boxes/config sets OWNER (GitHub user owning repos) and AGENT (agent GitHub username).
 set -euo pipefail
@@ -13,14 +13,12 @@ dry=false
 
 usage() {
   cat <<'EOF'
-Usage: box [--dry-run] new NAME [--python VER] [--node VER] [--packages "a b"] [--prompt TEXT]
-       box [--dry-run] reset NAME [--ref COMMIT|TAG]
+Usage: box [--dry-run] new NAME
+       box [--dry-run] reset NAME [--ref COMMIT]
        box [--dry-run] retire NAME
        box [--dry-run] destroy NAME
        box [--dry-run] rm NAME
-       box [--dry-run] versions NAME
        box [--dry-run] base
-       box [--dry-run] save-pstack
        box ls
 
 new      create the repo and a box
@@ -28,9 +26,7 @@ reset    delete the box and make a fresh one from the existing repo (at --ref if
 retire   delete the box and remove the agent's access to the repo
 destroy  retire, then delete the repo (asks first)
 rm       delete the box only; the repo and access stay
-versions list the repo's releases (one per merge to main)
-base     (re)build box-base and apply box/pstack-config to it
-save-pstack  copy the pstack config from box-base into box/pstack-config
+base     (re)build box-base and apply box/claude to it
 
 --dry-run prints every command instead of running it.
 EOF
@@ -49,45 +45,42 @@ run_in() {
 [ "${1:-}" != --dry-run ] || { dry=true; shift; }
 cmd="${1:-}"; shift || true
 
-# Files /pstack:setup-pstack writes, relative to ~/.claude.
-pstack_files=(rules/pstack-models.md)
-pstack_dir="$(dirname "$sandbox")/pstack-config"
+claude_dir="$(dirname "$sandbox")/claude"
 case "$cmd" in
   ls) run "$sandbox" ls; exit ;;
   base)
+    [ -s "$claude_dir/settings.json" ] || die "missing $claude_dir/settings.json"
+    ! grep -rqiE 'ghp_|github_pat_|sk-ant|oauth' "$claude_dir" || die "$claude_dir must not hold tokens"
     run "$sandbox" base
-    if [ ! -d "$pstack_dir" ]; then
-      echo "box: no $pstack_dir; pstack not configured in the base (run /pstack:setup-pstack in box-base, then: box save-pstack)" >&2
-    elif $dry; then echo "+ tar -C $pstack_dir -cf - . | orb -m box-base tar -C ~/.claude -xf -  (then orb stop box-base)" >&2
+    if $dry; then echo "+ tar -C $claude_dir -cf - . | orb -m box-base <copy into ~/.claude, merging settings.json with jq>" >&2
     else
       orb start box-base
-      tar -C "$pstack_dir" -cf - . | orb -m box-base bash -c 'mkdir -p ~/.claude && tar -C ~/.claude -xf -'
-      orb stop box-base
+      # settings.json is merged into the base's own; everything else is copied over.
+      tar -C "$claude_dir" -cf - . | orb -m box-base bash -lc '
+        set -e
+        stage="$(mktemp -d)"; tar -C "$stage" -xf -
+        mkdir -p ~/.claude; s=~/.claude/settings.json; [ -s "$s" ] || echo "{}" > "$s"
+        jq -s ".[0] * .[1]" "$s" "$stage/settings.json" > "$s.tmp" && mv "$s.tmp" "$s"
+        rm "$stage/settings.json"; cp -R "$stage/." ~/.claude/; rm -rf "$stage"'
     fi
+    while read -r plugin; do
+      src="$(jq -r --arg m "${plugin#*@}" '.extraKnownMarketplaces[$m].source | .repo // .url // empty' "$claude_dir/settings.json")"
+      [ -n "$src" ] || die "no marketplace source for $plugin in extraKnownMarketplaces"
+      # marketplace add fails if it is already there; install below still fails if it is truly missing.
+      run orb -m box-base bash -lc 'claude plugin marketplace add "$1" || true; claude plugin install "$2"' _ "$src" "$plugin"
+    done < <(jq -r '.enabledPlugins // {} | keys[]' "$claude_dir/settings.json")
+    $dry || orb stop box-base
     exit ;;
-  save-pstack)
-    if $dry; then echo "+ orb -m box-base tar -C ~/.claude -cf - ${pstack_files[*]} | tar -C $pstack_dir -xf -" >&2; exit; fi
-    mkdir -p "$pstack_dir"
-    orb start box-base
-    orb -m box-base bash -c 'cd ~/.claude && tar -cf - "$@"' _ "${pstack_files[@]}" | tar -C "$pstack_dir" -xf - ||
-      { orb stop box-base; die "could not read ${pstack_files[*]} from box-base; run /pstack:setup-pstack there first"; }
-    orb stop box-base
-    echo "saved ${pstack_files[*]} to $pstack_dir"
-    exit ;;
-  new | reset | retire | destroy | rm | versions) ;;
+  new | reset | retire | destroy | rm) ;;
   -h | --help | "") usage; exit ;;
   *) usage >&2; die "unknown command: $cmd" ;;
 esac
 
 name="${1:?usage: box $cmd NAME}"; shift
 [[ "$name" =~ ^[a-z][a-z0-9-]*$ ]] || die "NAME must be lowercase letters, digits, dashes (it is also the ssh user): $name"
-python="" node="" packages="" prompt="" ref=""
+ref=""
 while [ $# -gt 0 ]; do
   case "$cmd:$1" in
-    new:--python) python="${2:?--python needs a value}"; shift 2 ;;
-    new:--node) node="${2:?--node needs a value}"; shift 2 ;;
-    new:--packages) packages="${2?--packages needs a value}"; shift 2 ;;
-    new:--prompt) prompt="${2:?--prompt needs a value}"; shift 2 ;;
     reset:--ref) ref="${2:?--ref needs a value}"; shift 2 ;;
     *) usage >&2; die "unknown argument: $1" ;;
   esac
@@ -101,19 +94,6 @@ OWNER="" AGENT=""
 [ -n "$OWNER" ] && [ -n "$AGENT" ] || die "$config must set OWNER and AGENT"
 owner="$OWNER" agent="$AGENT"
 repo="repos/$owner/$name"
-nix_packages=()
-if [ -n "$python" ]; then
-  [[ "$python" =~ ^3\.[0-9]+$ ]] || die "--python must look like 3.12"
-  nix_packages+=("python${python/./}" uv)
-fi
-if [ -n "$node" ]; then
-  [[ "$node" =~ ^[0-9]+$ ]] || die "--node must be a major version like 22"
-  nix_packages+=("nodejs_${node}")
-fi
-for pkg in $packages; do
-  [[ "$pkg" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] || die "invalid package attribute: $pkg"
-  nix_packages+=("$pkg")
-done
 [[ -z "$ref" || "$ref" =~ ^[A-Za-z0-9_][A-Za-z0-9._/-]*$ ]] || die "invalid --ref: $ref"
 if ! $dry; then
   for tool in gh git herdr jq; do command -v "$tool" >/dev/null || die "$tool not found"; done
@@ -142,11 +122,9 @@ delete_repo() {
   run gh repo delete "$owner/$name" --yes
 }
 
-# Create the box, connect herdr, clone the repo and start the agent. $1 = accept the collaborator invite (new only).
+# Create the box, connect herdr, clone the repo and open its workspace. $1 = accept the collaborator invite (new only).
 provision() {
-  local accept="$1" qprompt=""
-  # %q makes the prompt one shell-safe word inside the unquoted heredoc below.
-  [ -z "$prompt" ] || qprompt="$(printf %q "$prompt")"
+  local accept="$1"
   # Machine add inside this step starts the box herdr server.
   echo "==> Creating box $name"
   run "$sandbox" new "$name"
@@ -208,21 +186,7 @@ mkdir -p ~/.claude
 [ -s ~/.claude.json ] || echo '{}' > ~/.claude.json
 jq --arg p "\$HOME/$name" '.projects[\$p].hasTrustDialogAccepted = true' ~/.claude.json > ~/.claude.json.tmp && mv ~/.claude.json.tmp ~/.claude.json
 for _ in \$(seq 30); do herdr workspace list >/dev/null 2>&1 && break; sleep 1; done
-pane="\$(herdr workspace create --cwd ~/$name --label $name --no-focus | jq -r .result.root_pane.pane_id)"
-# The pane's shell is busy loading direnv at first, so retry the start.
-for _ in \$(seq 120); do
-  herdr agent start $name --kind claude --pane "\$pane" >/dev/null 2>&1 && break
-  sleep 1
-done
-if [ -n "$qprompt" ]; then
-# agent_blocked means a dialog is up; retry for 60s, then warn and carry on (the pane stays attachable).
-sent=false
-for _ in \$(seq 30); do
-  herdr agent prompt $name $qprompt >/dev/null 2>&1 && { sent=true; break; }
-  sleep 2
-done
-\$sent || echo "box: agent still blocked after 60s, prompt not sent; answer it in herdr" >&2
-fi
+herdr workspace create --cwd ~/$name --label $name --no-focus >/dev/null
 EOF
 }
 
@@ -243,7 +207,6 @@ case "$cmd" in
     run gh api -X DELETE "$repo/collaborators/$agent" >/dev/null || echo "box: agent was not a collaborator, continuing" >&2
     delete_repo
     exit ;;
-  versions) run gh release list -R "$owner/$name" --json tagName,name,publishedAt --template '{{range .}}{{.tagName}}{{"\t"}}{{.name}}{{"\t"}}{{.publishedAt}}{{"\n"}}{{end}}'; exit ;;
   reset)
     machine_remove
     run "$sandbox" rm "$name"
@@ -275,8 +238,7 @@ trap cleanup EXIT
 cd "$dir"
 git init -q -b main
 
-{
-  cat <<'EOF'
+cat >flake.nix <<'EOF'
 {
   description = "dev shell";
 
@@ -284,7 +246,7 @@ git init -q -b main
 
   outputs = { self, nixpkgs }:
     let
-      forAllSystems = nixpkgs.lib.genAttrs [ "aarch64-darwin" "x86_64-linux" "aarch64-linux" ];
+      forAllSystems = nixpkgs.lib.genAttrs [ "aarch64-linux" "x86_64-linux" ];
     in
     {
       devShells = forAllSystems (system:
@@ -293,50 +255,15 @@ git init -q -b main
         in
         {
           default = pkgs.mkShell {
-            packages = with pkgs; [
-              git
-              jq
-              ripgrep
-              fd
-              just
-EOF
-  for pkg in ${nix_packages[@]+"${nix_packages[@]}"}; do echo "              $pkg"; done
-  cat <<'EOF'
-            ];
+            packages = [ ];
           };
         });
     };
 }
 EOF
-} >flake.nix
 
 echo "use flake" >.envrc
-[ -z "$python" ] || echo "export UV_PYTHON_DOWNLOADS=never" >>.envrc
-printf '.direnv/\n.DS_Store\nresult\n.worktrees/\n' >.gitignore
-[ -z "$python" ] || echo ".venv/" >>.gitignore
-mkdir -p .github/workflows
-
-# One release per push to main; its target is the pushed SHA, so `box reset --ref` can return to it.
-cat >.github/workflows/tag.yml <<'EOF'
-name: tag
-on:
-  push:
-    branches: [main]
-permissions:
-  contents: write
-jobs:
-  tag:
-    runs-on: ubuntu-latest
-    env:
-      GH_TOKEN: ${{ github.token }}
-      GH_REPO: ${{ github.repository }}
-    steps:
-      - run: |
-          pr="$(gh api "repos/$GH_REPO/commits/$GITHUB_SHA/pulls" --jq '.[0] | select(.) | "\(.title) (#\(.number))"')"
-          title="${pr:-$(gh api "repos/$GH_REPO/commits/$GITHUB_SHA" --jq '.commit.message | split("\n")[0]')}"
-          gh release create "merge-${{ github.run_number }}" --target "$GITHUB_SHA" --title "$title" --notes ""
-EOF
-
+printf '.direnv/\nresult\n.worktrees/\n' >.gitignore
 command -v nix >/dev/null && nix --extra-experimental-features "nix-command flakes" flake lock 2>/dev/null || true
 git add -A
 git commit -q -m "Initial commit"

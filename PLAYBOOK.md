@@ -5,29 +5,32 @@ What to do, situation by situation. Commands run on the Mac unless they say "ins
 ## Start a project
 
 ```sh
-box new myapp --python 3.12
+box new myapp
 ```
 
-1. In herdr, press `prefix+w` and pick `myapp`. Claude is open in the repo.
-2. Give it its first instruction. pstack doesn't start on its own, so begin with `/pstack:poteto-mode` if you want its playbooks. Or pass the instruction up front:
-   `box new myapp --python 3.12 --prompt "/pstack:poteto-mode <what to build>"`
-3. Want to check the steps first? Run `box --dry-run new myapp --python 3.12`.
+1. In herdr, press `prefix+w` and pick `myapp`. The workspace is open in the repo, with no agent running.
+2. Start Claude yourself: run `claude`, then give it its first instruction.
+3. Want to check the steps first? Run `box --dry-run new myapp`.
+
+The repo is public, so don't put secrets in it.
 
 ## Watch and talk to agents
 
 - **herdr:** the sidebar lists every box. The agent list shows each agent as working, idle or waiting. `prefix+w` switches boxes.
-- **GitHub:** the repo's Pull requests, Actions and Releases pages.
+- **GitHub:** the repo's Pull requests and commit history.
 - **A shell inside a box:** `ssh myapp@orb`, or `orb -m myapp` for quick admin commands. The dev shell loads in interactive shells. For one-off commands, use `direnv exec . <cmd>` inside the repo.
 
 ## Add tools to a project
 
-Tell the agent: "add `<tool>` to `flake.nix`", or for Python, "`uv add <package>`". direnv reloads the shell automatically.
+Tell the agent: "add `<tool>` to the `packages` list in `flake.nix`". direnv reloads the shell automatically.
 
-## Find a known-good version
+## Add a Claude plugin to every new box
 
-```sh
-box versions myapp
-```
+Edit `box/claude/settings.json` (add it to `enabledPlugins`, and its marketplace to `extraKnownMarketplaces`), then run `box base`. New boxes get it; existing boxes keep their old config until `box reset`.
+
+## Find a known-good commit
+
+Use `git log` in a clone, or the repo's commit history on GitHub, and note the commit id.
 
 ## The agent is stuck or confused
 
@@ -38,11 +41,11 @@ box versions myapp
 
 **Undo specific changes:** tell any agent, "revert commits `<sha>`…`<sha>` in one PR."
 
-**Jump back to a known-good version:** you're the repo admin, so the ruleset lets you do this.
+**Jump back to a known-good commit:** you're the repo admin, so the ruleset lets you do this.
 ```sh
-box versions myapp
 git clone https://github.com/<owner>/myapp /tmp/fix && cd /tmp/fix
-git push --force origin merge-12:main
+git log --oneline
+git push --force origin <good-commit>:main
 ```
 Only `git push` in that clone. Don't run anything else from an agent-written repo on the Mac.
 
@@ -54,7 +57,7 @@ Only `git push` in that clone. Don't run anything else from an agent-written rep
    - **Claude:** revoke the old token in your Claude account settings, then run `claude setup-token` and save the new one to `~/agent-boxes/.claude-token`.
 3. **Check what it touched:** recent commits and PRs here, in your other box projects (the agent account can reach those too), and on the agent account's own profile.
 4. **Restore `main`** if needed (see above).
-5. **Start fresh from a safe version:** `box reset myapp --ref merge-12`.
+5. **Start fresh from a safe commit:** `box reset myapp --ref <good-commit>`.
 
 ## A project is finished
 
@@ -72,7 +75,7 @@ Only `git push` in that clone. Don't run anything else from an agent-written rep
 | --- | --- |
 | Every 90 days | **The agent token expires.** Make a new one (`public_repo` + `repo:invite`), save it to `.agent-token`, and `box reset` active projects |
 | Monthly | **Rebuild the base** for updates: `box base` |
-| After changing pstack settings | Run `/pstack:setup-pstack` inside `ssh box-base@orb`, then `box save-pstack` |
+| After editing `box/claude/` | Run `box base`, then `box reset` active projects to pick it up |
 | Overnight runs | **Keep the Mac plugged in and awake,** since boxes pause when it sleeps |
 | Weekly | **Check Claude plan usage.** All boxes share it |
 

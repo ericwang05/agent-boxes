@@ -33,14 +33,10 @@ chown -R "$SETUP_USER:$SETUP_USER" "$home/.config" "$home/.bashrc"
 # --- herdr ---
 as_user 'curl -fsSL https://herdr.dev/install.sh | sh'
 
-# --- Claude Code (native installer) + pstack plugin ---
+# --- Claude Code (native installer); settings and plugins come from box/claude via `box base` ---
 as_user 'curl -fsSL https://claude.ai/install.sh | bash'
-as_user 'claude plugin marketplace add cursor/plugins && claude plugin install pstack@cursor-plugins'
 
-# Merge, not overwrite: the plugin/integration steps above already wrote settings.
 install -d -o "$SETUP_USER" -g "$SETUP_USER" "$home/.claude"
-s="$home/.claude/settings.json"; [ -s "$s" ] || echo '{}' > "$s"
-jq '.permissions.defaultMode = "bypassPermissions" | .skipDangerousModePermissionPrompt = true' "$s" > "$s.tmp" && mv "$s.tmp" "$s"
 [ -s "$home/.claude.json" ] || echo '{"hasCompletedOnboarding": true}' > "$home/.claude.json"
 chown -R "$SETUP_USER:$SETUP_USER" "$home/.claude" "$home/.claude.json"
 

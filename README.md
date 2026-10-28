@@ -5,24 +5,23 @@
 One command gives a Claude Code agent its own disposable Linux machine, a GitHub repo and a Nix dev shell, walled off from my Mac. I watch and talk to every agent from one herdr window.
 
 ```sh
-box new myapp --python 3.12
+box new myapp
 ```
 
-**Scope:** this repo builds the environment only: the repo, the dev shell, the isolated machine and the herdr connection. It deliberately sets no agent behavior. Workflow rules, the definition of done and any reviewer or judge agents belong to each project or to separate skills. It's built for Claude Code only.
+**Scope:** this repo builds the environment only: the repo, an empty dev shell, the isolated machine and the herdr connection. It starts no agent and sets no agent behavior beyond the Claude Code config you put in `box/claude/`. Workflow rules, the definition of done and any reviewer or judge agents belong to each project or to separate skills. It's built for Claude Code only.
 
 ## What `box new` does
 
 1. **Repo.** It creates `github.com/<owner>/<name>` (public) with:
-   - a Nix flake dev shell (`flake.nix`, `flake.lock`, `.envrc`) and a `.gitignore`
+   - an empty Nix flake dev shell for `aarch64-linux` and `x86_64-linux` (`flake.nix`, `flake.lock`, `.envrc`) and a `.gitignore`
    - a minimal ruleset that blocks force-pushes and deletion of `main`, so history can't be erased; the repo admin can bypass it
-   - a `tag` workflow that publishes every push to `main` as a GitHub Release named `merge-<n>`, titled with the PR, so known-good versions are easy to find
 2. **Agent access.** It invites the agent's GitHub account as a write collaborator.
 3. **Box.** It clones the prebuilt OrbStack machine `box-base` and sets up the clone:
    - isolates it, with CPU and memory limits
-   - installs the firewall and checks isolation: the internet must work, while the host and home network must be blocked
-   - injects the two tokens and removes `sudo`
+   - installs the firewall, removes `sudo`, then checks isolation (all checks are fatal): the internet must work; the host, the home network and `sudo` must be blocked; no host files may be mounted
+   - injects the two tokens, only after the checks pass
 4. **Inside the box.** It accepts the invite, matched by repo ID, confirms the agent can push, clones the repo, runs `direnv allow`, and pre-accepts Claude Code's folder-trust prompt.
-5. **herdr.** It registers the box as a herdr machine and opens a Claude Code pane in the repo, optionally sending `--prompt "..."` as the first message.
+5. **herdr.** It registers the box as a herdr machine and creates one workspace at `~/<name>`. No agent is started; open Claude Code in that workspace yourself.
 
 If any step fails after the repo is created, `box new` rolls back: it removes the box, the herdr entry and the repo. Set `BOX_KEEP=1` to keep everything for debugging instead.
 
@@ -30,15 +29,13 @@ If any step fails after the repo is created, `box new` rolls back: it removes th
 
 | Command | What it does |
 | --- | --- |
-| `box new <name> [--python 3.12] [--node 22] [--packages "a b"] [--prompt "..."]` | new repo + box + herdr pane |
-| `box reset <name> [--ref <commit-or-tag>]` | fresh box for an **existing** repo, optionally at a known-good version |
+| `box new <name>` | new repo + box + herdr workspace |
+| `box reset <name> [--ref <commit>]` | fresh box for an **existing** repo, optionally at a known-good commit |
 | `box rm <name>` | delete the box only |
 | `box retire <name>` | project finished: delete the box and herdr entry, and revoke the agent's access. The repo stays |
 | `box destroy <name>` | delete everything, **including the repo** (asks to confirm) |
-| `box versions <name>` | list `merge-<n>` versions with titles and dates |
 | `box ls` | list boxes |
-| `box base` | rebuild `box-base` and apply the saved pstack config |
-| `box save-pstack` | copy pstack's config from `box-base` into `box/pstack-config/` |
+| `box base` | rebuild `box-base` and apply `box/claude/` to it |
 | `box --dry-run <command>` | print every step without running anything |
 
 ## Isolation model
@@ -51,13 +48,25 @@ If any step fails after the repo is created, `box new` rolls back: it removes th
 | Other boxes | no (best effort) | nftables rejects OrbStack's internal ranges |
 | IPv6 | no | nftables |
 | `sudo` / undoing the firewall | no | sudo grant removed at creation |
-| My files, SSH keys, SSH agent | no | no mounts, `ForwardAgent no` |
+| My files, SSH keys, SSH agent | no | no mounts (checked at creation), `ForwardAgent no` |
 
 **Credentials in a box: exactly two.**
 - **The agent GitHub account's classic token,** scopes `public_repo` and `repo:invite`. It can push only to repos the account was invited to, can accept invites, and can't change CI.
 - **A Claude Code token** from `claude setup-token`, which can make model requests and nothing else.
 
-The base image holds no credentials. Commits are authored as me (so they count toward my contribution graph) and pushed by the agent account. Inside a box, the agent adds system tools by editing `flake.nix` and Python packages with `uv add`. Nix builds in its own sandbox, and the agent can't add untrusted binary caches.
+The base image holds no credentials. Commits are authored as me (so they count toward my contribution graph) and pushed by the agent account. Inside a box, the agent adds tools by editing the `packages` list in `flake.nix`. Nix builds in its own sandbox, and the agent can't add untrusted binary caches.
+
+## Claude config
+
+`box/claude/` is the Claude Code config every box starts with. `box base` copies it into the base's `~/.claude`:
+
+| Path | What |
+| --- | --- |
+| `box/claude/settings.json` | merged into the base's `settings.json` with `jq`. Holds permission defaults, `enabledPlugins` and `extraKnownMarketplaces` |
+| `box/claude/rules/` | copied to `~/.claude/rules/` |
+| `box/claude/CLAUDE.md` | optional; copied to `~/.claude/CLAUDE.md` |
+
+For every key in `enabledPlugins`, `box base` runs `claude plugin marketplace add` for its marketplace (looked up in `extraKnownMarketplaces`) and `claude plugin install <plugin>`. To add a plugin, edit `box/claude/settings.json`, then run `box base`. Never put tokens in `box/claude/`; `box base` refuses if it finds one.
 
 ## One-time setup
 
@@ -83,17 +92,17 @@ The base image holds no credentials. Commits are authored as me (so they count t
      IdentitiesOnly yes
      ForwardAgent no
    ```
-6. **Build the base:** `box base`. The first time, also run `ssh box-base@orb`, start `claude`, run `/pstack:setup-pstack`, exit, then `box save-pstack`, so future rebuilds apply your choices automatically.
+6. **Build the base:** `box base`. It also applies `box/claude/`.
 7. **Put `box` on your PATH:** `ln -s ~/agent-boxes/bin/box ~/.local/bin/box`
 
 ## Layout
 
 | Path | What |
 | --- | --- |
-| `bin/box` | Mac-side CLI: repo, invite, box lifecycle, herdr, versions |
+| `bin/box` | Mac-side CLI: repo, invite, box lifecycle, herdr, Claude config |
 | `box/sandbox` | box layer: `base`, `new`, `exec`, `rm`, `ls` |
-| `box/setup.sh` | provisions `box-base`: Nix, direnv, herdr, Claude Code, pstack, firewall |
-| `box/pstack-config/` | saved pstack settings applied by `box base` |
+| `box/setup.sh` | provisions `box-base`: Nix, direnv, herdr, Claude Code, firewall |
+| `box/claude/` | Claude Code config applied by `box base` |
 
 ## Safety rules
 

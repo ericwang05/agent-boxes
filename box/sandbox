@@ -104,7 +104,7 @@ systemctl enable box-firewall.service
 FW
 }
 
-# Fail closed: the internet works, and neither the host nor the LAN gateway is reachable.
+# Fail closed: the internet works; the host, the LAN and sudo are out; no host files are mounted.
 check_isolation() {
   orb -m "$1" curl -fsS -m 15 -o /dev/null https://github.com \
     || { echo "error: '$1' cannot reach https://github.com - gateway/DNS rules too strict?" >&2; return 1; }
@@ -112,7 +112,11 @@ check_isolation() {
     || { echo "error: '$1' can reach the host (host.orb.internal)" >&2; return 1; }
   ! orb -m "$1" curl -m 3 -s -o /dev/null http://192.168.1.1 \
     || { echo "error: '$1' can reach the LAN (192.168.1.1)" >&2; return 1; }
-  echo "isolation ok: github.com reachable; host and LAN blocked"
+  ! orb -m "$1" sudo -n true 2>/dev/null \
+    || { echo "error: '$1' still has sudo" >&2; return 1; }
+  orb -m "$1" bash -c '! mount | grep -qiE "/Users|/mnt/mac" && [ ! -e /mnt/mac ]' \
+    || { echo "error: '$1' has host files mounted (/Users or /mnt/mac)" >&2; return 1; }
+  echo "isolation ok: github.com reachable; host, LAN and sudo blocked; no host mounts"
 }
 
 # Tokens and git identity go over stdin/env, never argv, and are set per box so the base holds no credentials.
@@ -168,9 +172,9 @@ STEPS
     orb stop "$name" >/dev/null 2>&1 || true
     orb start "$name"
     install_firewall "$name"
+    harden "$name"
     check_isolation "$name"
     inject_token "$name"
-    harden "$name"
     trap - ERR
     echo "ready: $0 exec $name '<cmd>'"
     ;;
