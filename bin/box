@@ -123,6 +123,7 @@ delete_repo() {
   run gh repo delete "$owner/$name" --yes
 }
 
+repo_id=0 # only new knows the id; reset passes accept=0 and never reads it
 # Create the box, connect herdr, clone the repo and open its workspace. $1 = accept the collaborator invite (new only).
 provision() {
   local accept="$1"
