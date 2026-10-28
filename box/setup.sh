@@ -18,9 +18,8 @@ cat > /etc/profile.d/nix-path.sh << 'EOP'
 export PATH="$PATH:/nix/var/nix/profiles/default/bin:$HOME/.local/bin"
 EOP
 
-# --- herdr (user install) + Claude integration ---
+# --- herdr ---
 as_user 'curl -fsSL https://herdr.dev/install.sh | sh'
-as_user 'herdr integration install claude'
 
 # --- Claude Code (native installer) + pstack plugin ---
 as_user 'curl -fsSL https://claude.ai/install.sh | bash'
@@ -32,6 +31,9 @@ s="$home/.claude/settings.json"; [ -s "$s" ] || echo '{}' > "$s"
 jq '.permissions.defaultMode = "bypassPermissions" | .skipDangerousModePermissionPrompt = true' "$s" > "$s.tmp" && mv "$s.tmp" "$s"
 [ -s "$home/.claude.json" ] || echo '{"hasCompletedOnboarding": true}' > "$home/.claude.json"
 chown -R "$SETUP_USER:$SETUP_USER" "$home/.claude" "$home/.claude.json"
+
+# Needs ~/.claude to exist, so it runs after the Claude Code install.
+as_user 'herdr integration install claude'
 
 # --- Git identity (credentials are injected per box by `sandbox new`) ---
 git config --system user.name  "Eric Wang"
