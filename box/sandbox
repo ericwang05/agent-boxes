@@ -131,7 +131,7 @@ check_isolation() {
   $base_up || orb start "$BASE"
   # one place to tear down: listeners are killed on every exit path, then the base is stopped if we started it
   stop_listeners() {
-    orb -m "$BASE" -u root bash -c 'kill $(cat /tmp/box-nc.pids 2>/dev/null) 2>/dev/null; rm -f /tmp/box-nc.pids' || true
+    orb -m "$BASE" -u root bash -c 'kill $(cat /tmp/box-nc.pids 2>/dev/null) 2>/dev/null; pkill -f "nc .*-lk .* 4739[12]"; rm -f /tmp/box-nc.pids' || true
     $base_up || orb stop "$BASE"
   }
   ip="$(orb -m "$BASE" hostname -I | awk '{print $1}')"
