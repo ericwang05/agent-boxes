@@ -136,13 +136,10 @@ machine_remove() {
   else echo "box: no herdr machine labeled $name, continuing" >&2; fi
 }
 
-# delete_repo scope is not kept: add it for the delete, drop it again after.
+# Add the delete_repo scope once if gh lacks it; it stays.
 delete_repo() {
-  local rc=0
   if $dry || ! gh auth status 2>&1 | grep -q delete_repo; then run gh auth refresh -s delete_repo; fi
-  run gh repo delete "$owner/$name" --yes || rc=$?
-  run gh auth refresh -r delete_repo
-  return $rc
+  run gh repo delete "$owner/$name" --yes
 }
 
 # Create the box, connect herdr, clone the repo and start the agent. $1 = accept the collaborator invite (new only).
@@ -181,7 +178,12 @@ if [ "$accept" = 1 ]; then
     sleep 2
   done
   [ -n "\$id" ] || { echo "box: no invitation to $owner/$name found" >&2; exit 1; }
-  gh api -X PATCH "user/repository_invitations/\$id" >/dev/null
+  if ! out="\$(gh api -i -X PATCH "user/repository_invitations/\$id" 2>&1)"; then
+    echo "box: accepting the invitation failed: \$(head -n1 <<<"\$out")" >&2
+    echo "\$out" | awk 'f; /^\r?\$/ { f = 1 }' >&2
+    ! grep -qi scope <<<"\$out" || echo "box: agent token needs the repo:invite scope" >&2
+    exit 1
+  fi
   [ "\$(gh api repos/$owner/$name --jq .permissions.push)" = true ] || { echo "box: agent has no push access to $owner/$name" >&2; exit 1; }
 fi
 gh repo clone $owner/$name ~/$name
