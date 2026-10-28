@@ -1,3 +1,4 @@
 .agent-token
 .worktrees/
 .claude/
+.claude-token
