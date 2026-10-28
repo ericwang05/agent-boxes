@@ -5,6 +5,7 @@ set -euo pipefail
 BASE=box-base
 HERE=$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && pwd)
 TOKEN_FILE="${AGENT_TOKEN_FILE:-$HOME/agent-boxes/.agent-token}"
+ACCOUNT_FILE="$HOME/.config/agent-account"
 SANDBOX_DISTRO="${SANDBOX_DISTRO:-debian:trixie}"
 SANDBOX_USER="${USER:-$(id -un)}"
 
@@ -39,17 +40,28 @@ harden() {
     fi'
 }
 
+# Token goes over stdin, never argv. Per box, so rotating it needs no base rebuild.
+inject_token() {
+  { tr -d '[:space:]' < "$ACCOUNT_FILE"; echo; tr -d '[:space:]' < "$TOKEN_FILE"; echo; } |
+    orb -m "$1" -u root env SETUP_USER="$SANDBOX_USER" bash -c '
+      set -e
+      read -r agent; read -r token
+      h=/home/$SETUP_USER
+      printf "https://%s:%s@github.com\n" "$agent" "$token" > $h/.git-credentials
+      chown $SETUP_USER:$SETUP_USER $h/.git-credentials; chmod 600 $h/.git-credentials
+      printf "export GH_TOKEN=%s\n" "$token" > /etc/profile.d/gh-token.sh; chmod 644 /etc/profile.d/gh-token.sh'
+}
+
 cmd="${1:-help}"; shift || true
 case "$cmd" in
   base)
-    [ -r "$TOKEN_FILE" ] || { echo "error: no agent token at $TOKEN_FILE" >&2; exit 1; }
     if exists "$BASE"; then
       read -r -p "Rebuild '$BASE' from scratch? [y/N] " ans
       [ "$ans" = y ] || exit 0
       orb delete -f "$BASE"
     fi
     orb create --isolated --isolate-network "$SANDBOX_DISTRO" "$BASE"
-    orb -m "$BASE" sudo env SETUP_USER="$SANDBOX_USER" AGENT_TOKEN="$(cat "$TOKEN_FILE")" \
+    orb -m "$BASE" sudo env SETUP_USER="$SANDBOX_USER" \
       bash -s < "$HERE/setup.sh"
     orb stop "$BASE"
     cat <<STEPS
@@ -67,11 +79,14 @@ STEPS
     name="${1:-}"; need_name "$name"
     exists "$BASE" || { echo "error: no base - run: $0 base" >&2; exit 1; }
     exists "$name" && { echo "error: '$name' already exists" >&2; exit 1; }
+    [ -r "$TOKEN_FILE" ] || { echo "error: no agent token at $TOKEN_FILE" >&2; exit 1; }
+    [ -r "$ACCOUNT_FILE" ] || { echo "error: no agent username at $ACCOUNT_FILE" >&2; exit 1; }
     trap 'orb delete -f "$name" >/dev/null 2>&1 || true; echo "error: creation failed, cleaned up" >&2' ERR
     orb clone "$BASE" "$name"
     orb config set "machine.$name.isolated" true
     orb config set "machine.$name.isolate_network" true
     orb start "$name"
+    inject_token "$name"
     harden "$name"
     trap - ERR
     echo "ready: $0 exec $name '<cmd>'"
@@ -79,8 +94,9 @@ STEPS
   exec)
     name="${1:-}"; need_name "$name"
     exists "$name" || { echo "error: no machine '$name'" >&2; exit 1; }
-    [ -n "${2:-}" ] || { usage >&2; exit 1; }
-    exec orb -m "$name" bash -lc "$2"
+    shift; [ $# -gt 0 ] || { usage >&2; exit 1; }
+    # "$*" so `exec n 'cmd'` and `exec n bash -s` (stdin passthrough) both work
+    exec orb -m "$name" bash -lc "$*"
     ;;
   rm)
     name="${1:-}"; need_name "$name"

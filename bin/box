@@ -36,7 +36,9 @@ case "$cmd" in
   rm)
     name="${1:?usage: box rm NAME}"
     # The machine may never have been added; still remove the box.
-    run herdr machine remove "$name" || echo "box: herdr machine remove failed, continuing" >&2
+    id="$(herdr machine list --json | jq -r --arg l "$name" '[.. | objects | select(.label? == $l) | .id][0] // empty')"
+    if [ -n "$id" ]; then run herdr machine remove "$id" || echo "box: herdr machine remove failed, continuing" >&2
+    else echo "box: no herdr machine labeled $name, continuing" >&2; fi
     run "$sandbox" rm "$name"
     exit ;;
   new) ;;
@@ -137,6 +139,7 @@ cat >AGENTS.md <<EOF
 - Work on branch \`agent\` and push often. CI merges to \`main\` when \`done.sh\` passes.
 - Never edit \`done.sh\`, \`tests/acceptance/\` or \`.github/\`.
 - Python packages go in \`pyproject.toml\` via \`uv\`; system tools go in \`flake.nix\`.
+- CI rebase-merges. Before every push run \`git fetch origin && git rebase origin/main\` on branch \`agent\`; already-merged commits drop out and the up-to-date check passes.
 - If blocked, write \`REPORT.md\` (done / blocked + why / what you need), push, stop.
 EOF
 
