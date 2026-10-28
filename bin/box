@@ -44,33 +44,33 @@ cmd="${1:-}"; shift || true
 
 case "$cmd" in
   ls) run "$sandbox" ls; exit ;;
-  rm)
-    name="${1:?usage: box rm NAME}"
-    # The machine may never have been added; still remove the box.
-    id="$(herdr machine list --json | jq -r --arg l "$name" '[.. | objects | select(.label? == $l) | .id][0] // empty')"
-    if [ -n "$id" ]; then run herdr machine remove "$id" || echo "box: herdr machine remove failed, continuing" >&2
-    else echo "box: no herdr machine labeled $name, continuing" >&2; fi
-    run "$sandbox" rm "$name"
-    exit ;;
-  new) ;;
+  new | reset | retire | rm | versions) ;;
   -h | --help | "") usage; exit ;;
   *) usage >&2; die "unknown command: $cmd" ;;
 esac
 
-name="${1:?usage: box new NAME [options]}"; shift
-python="" node="" packages="" prompt=""
+name="${1:?usage: box $cmd NAME}"; shift
+[[ "$name" =~ ^[a-z][a-z0-9-]*$ ]] || die "NAME must be lowercase letters, digits, dashes (it is also the ssh user): $name"
+python="" node="" packages="" prompt="" ref=""
 while [ $# -gt 0 ]; do
-  case "$1" in
-    --python) python="${2:?--python needs a value}"; shift 2 ;;
-    --node) node="${2:?--node needs a value}"; shift 2 ;;
-    --packages) packages="${2?--packages needs a value}"; shift 2 ;;
-    --prompt) prompt="${2:?--prompt needs a value}"; shift 2 ;;
+  case "$cmd:$1" in
+    new:--python) python="${2:?--python needs a value}"; shift 2 ;;
+    new:--node) node="${2:?--node needs a value}"; shift 2 ;;
+    new:--packages) packages="${2?--packages needs a value}"; shift 2 ;;
+    new:--prompt) prompt="${2:?--prompt needs a value}"; shift 2 ;;
+    reset:--ref) ref="${2:?--ref needs a value}"; shift 2 ;;
     *) usage >&2; die "unknown argument: $1" ;;
   esac
 done
 
 # Validate everything up front so a bad flag never leaves a half-made box.
-[[ "$name" =~ ^[a-z][a-z0-9-]*$ ]] || die "NAME must be lowercase letters, digits, dashes (it is also the ssh user): $name"
+[ -r "$config" ] || die "missing $config (set OWNER=<github user> and AGENT=<agent github user>)"
+OWNER="" AGENT=""
+# shellcheck disable=SC1090
+. "$config"
+[ -n "$OWNER" ] && [ -n "$AGENT" ] || die "$config must set OWNER and AGENT"
+owner="$OWNER" agent="$AGENT"
+repo="repos/$owner/$name"
 nix_packages=()
 if [ -n "$python" ]; then
   [[ "$python" =~ ^3\.[0-9]+$ ]] || die "--python must look like 3.12"
@@ -84,17 +84,111 @@ for pkg in $packages; do
   [[ "$pkg" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] || die "invalid package attribute: $pkg"
   nix_packages+=("$pkg")
 done
-[ -r "$agent_file" ] || die "missing $agent_file (agent GitHub username)"
-agent="$(tr -d '[:space:]' <"$agent_file")"
-[ -n "$agent" ] || die "$agent_file is empty"
+[[ -z "$ref" || "$ref" =~ ^[A-Za-z0-9_][A-Za-z0-9._/-]*$ ]] || die "invalid --ref: $ref"
 if ! $dry; then
   for tool in gh git herdr jq; do command -v "$tool" >/dev/null || die "$tool not found"; done
   [ -x "$sandbox" ] || die "box layer not found or not executable: $sandbox"
   [ "$(gh api user --jq .login 2>/dev/null)" = "$owner" ] || die "gh is not logged in as $owner; run: gh auth login"
-  ! gh repo view "$owner/$name" >/dev/null 2>&1 || die "repo $owner/$name already exists"
+  if [ "$cmd" = new ]; then
+    ! gh repo view "$owner/$name" >/dev/null 2>&1 || die "repo $owner/$name already exists"
+  elif [ "$cmd" != rm ]; then
+    gh repo view "$owner/$name" >/dev/null 2>&1 || die "repo $owner/$name does not exist"
+  fi
 fi
 
-# --- 1. Mac side: repo contents ---
+# The machine may never have been added; still carry on.
+machine_remove() {
+  local id
+  id="$(herdr machine list --json | jq -r --arg l "$name" '[.. | objects | select(.label? == $l) | .id][0] // empty')"
+  if [ -n "$id" ]; then run herdr machine remove "$id" || echo "box: herdr machine remove failed, continuing" >&2
+  else echo "box: no herdr machine labeled $name, continuing" >&2; fi
+}
+
+# Create the box, connect herdr, clone the repo and start the agent. $1 = accept the collaborator invite (new only).
+provision() {
+  local accept="$1" qprompt=""
+  # %q makes the prompt one shell-safe word inside the unquoted heredoc below.
+  [ -z "$prompt" ] || qprompt="$(printf %q "$prompt")"
+  # Machine add inside this step starts the box herdr server.
+  echo "==> Creating box $name"
+  run "$sandbox" new "$name"
+  # herdr reaches the box over ssh; fail here with a hint rather than inside machine add.
+  local ssh_ok=false
+  for _ in $(seq 10); do
+    run ssh -o BatchMode=yes "$name@orb" true && { ssh_ok=true; break; }
+    sleep 1
+  done
+  $ssh_ok || die "cannot ssh $name@orb non-interactively; add this to ~/.ssh/config:
+Host orb
+  HostName 127.0.0.1
+  Port 32222
+  User default
+  IdentityFile ~/.orbstack/ssh/id_ed25519
+  IdentitiesOnly yes
+  ForwardAgent no"
+  # Before any pane exists: machine add starts the box's herdr server and may restart it, killing panes.
+  # No tty on stdin keeps it non-interactive; a fresh box has herdr installed and no server, so nothing to confirm.
+  run herdr machine add "ssh://$name@orb" --label "$name" --remote-session default </dev/null
+  # The invite can lag behind the PUT, so retry the accept.
+  run_in "$sandbox" exec "$name" bash -s <<EOF
+set -euo pipefail
+[ -n "\${GH_TOKEN:-}" ] || { echo "box: GH_TOKEN (agent token) missing in the box" >&2; exit 1; }
+if [ "$accept" = 1 ]; then
+  for _ in \$(seq 30); do
+    id="\$(gh api user/repository_invitations --paginate --jq 'first(.[] | select(.repository.full_name == "$owner/$name") | .id) // empty')"
+    [ -z "\$id" ] || break
+    sleep 2
+  done
+  [ -n "\$id" ] || { echo "box: no invitation to $owner/$name found" >&2; exit 1; }
+  gh api -X PATCH "user/repository_invitations/\$id"
+fi
+# GH_TOKEN alone is not enough: herdr panes may not source /etc/profile.d. gh refuses to store a token while GH_TOKEN is set.
+printf %s "\$GH_TOKEN" | env -u GH_TOKEN gh auth login --with-token
+gh auth setup-git
+gh repo clone $owner/$name ~/$name
+cd ~/$name
+[ -z "$ref" ] || git checkout "$ref"
+direnv allow ~/$name
+# Pre-accept folder trust so the agent never blocks on a dialog.
+mkdir -p ~/.claude
+[ -s ~/.claude.json ] || echo '{}' > ~/.claude.json
+jq --arg p "\$HOME/$name" '.projects[\$p].hasTrustDialogAccepted = true' ~/.claude.json > ~/.claude.json.tmp && mv ~/.claude.json.tmp ~/.claude.json
+for _ in \$(seq 30); do herdr workspace list >/dev/null 2>&1 && break; sleep 1; done
+pane="\$(herdr workspace create --cwd ~/$name --label $name --no-focus | jq -r .result.root_pane.pane_id)"
+# The pane's shell is busy loading direnv at first, so retry the start.
+for _ in \$(seq 120); do
+  herdr agent start $name --kind claude --pane "\$pane" >/dev/null 2>&1 && break
+  sleep 1
+done
+if [ -n "$qprompt" ]; then
+# agent_blocked means a dialog is up; retry for 60s, then warn and carry on (the pane stays attachable).
+sent=false
+for _ in \$(seq 30); do
+  herdr agent prompt $name $qprompt >/dev/null 2>&1 && { sent=true; break; }
+  sleep 2
+done
+\$sent || echo "box: agent still blocked after 60s, prompt not sent; answer it in herdr" >&2
+fi
+EOF
+}
+
+case "$cmd" in
+  rm) machine_remove; run "$sandbox" rm "$name"; exit ;;
+  retire)
+    machine_remove
+    run "$sandbox" rm "$name"
+    run gh api -X DELETE "$repo/collaborators/$agent"
+    exit ;;
+  versions) run gh release list -R "$owner/$name" --json tagName,name,publishedAt --template '{{range .}}{{.tagName}}{{"\t"}}{{.name}}{{"\t"}}{{.publishedAt}}{{"\n"}}{{end}}'; exit ;;
+  reset)
+    machine_remove
+    run "$sandbox" rm "$name"
+    provision 0
+    echo "box $name reset${ref:+ at $ref}: github.com/$owner/$name"
+    exit ;;
+esac
+
+# --- new, 1. Mac side: repo contents ---
 dir="$(mktemp -d "${TMPDIR:-/tmp}/box.XXXXXX")"
 $dry || trap 'rm -rf "$dir"' EXIT
 cd "$dir"
@@ -105,7 +199,7 @@ git init -q -b main
 {
   description = "dev shell";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-26.05-darwin";
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
 
   outputs = { self, nixpkgs }:
     let
@@ -137,105 +231,29 @@ EOF
 
 echo "use flake" >.envrc
 [ -z "$python" ] || echo "export UV_PYTHON_DOWNLOADS=never" >>.envrc
-printf '.direnv/\n.DS_Store\nresult\n' >.gitignore
+printf '.direnv/\n.DS_Store\nresult\n.worktrees/\n' >.gitignore
 [ -z "$python" ] || echo ".venv/" >>.gitignore
-: >done.sh
-chmod +x done.sh
-mkdir -p tests/acceptance .github/workflows
-: >tests/acceptance/.gitkeep
+mkdir -p .github/workflows
 
-cat >AGENTS.md <<EOF
-# $name
-
-- One branch and one PR per change: \`git fetch && git switch -c <type>/<short-name> origin/main\`, commit, \`git push -u origin HEAD\`, then open the PR (CI also opens one if you forget). CI merges it to \`main\` when \`done.sh\` passes and deletes the branch.
-- Never reuse a merged branch and never force-push. If main moved on and your open branch fell behind, start a fresh branch from \`origin/main\` and cherry-pick instead.
-- After pushing, run \`gh pr checks --watch\` and wait for green. On a failure, read the log with \`gh run view <run-id> --log-failed\` (run id from \`gh run list --branch <branch>\`) before changing anything, then fix it on the same branch, push, and watch again. Do not move on to the next change until the PR has merged.
-- Never edit \`.github/\`. Edit \`done.sh\` and \`tests/acceptance/\` only when I explicitly ask you to define or change "done", and only while main's \`done.sh\` is still the empty placeholder: after that CI rejects such PRs and only I change them on main.
-- Open small PRs, one change each. Use the pstack \`poteto-mode\` Autopilot-full playbook (\`playbooks/autopilot-full.md\`) for queues of PRs, and its Shipping playbook (\`playbooks/shipping.md\`) to verify before landing.
-- Python packages go in \`pyproject.toml\` via \`uv\`; system tools go in \`flake.nix\`.
-- If blocked, write \`REPORT.md\` (done / blocked + why / what you need), push, stop.
-EOF
-
-# A PR made with GITHUB_TOKEN triggers no workflows; the push run's "done" check on the same commit satisfies the ruleset.
-cat >.github/workflows/done.yml <<'EOF'
-name: done
-on:
-  push:
-    branches-ignore: [main]
-  pull_request:
-    branches: [main]
-permissions:
-  contents: read
-jobs:
-  done:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-      - uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31.11.2
-      - run: |
-          # Until main has a real done.sh, only a spec change may pass.
-          if [ -z "$(git show origin/main:done.sh | tr -d '[:space:]')" ]; then
-            extra="$(git diff --name-only origin/main...HEAD | grep -v -E '^(done\.sh|SPEC\.md|tests/acceptance/)' || true)"
-            if [ -n "$extra" ]; then
-              echo "main has no spec yet: only done.sh, tests/acceptance/ and SPEC.md may change. Offending files:"
-              echo "$extra"
-              exit 1
-            fi
-            echo "bootstrap: spec-only change, nothing to run"
-            exit 0
-          fi
-          # Trust on first use: once main has a real done.sh, only the owner changes it, on main.
-          if git diff --name-only origin/main...HEAD | grep -q -E '^(done\.sh|tests/acceptance/)'; then
-            echo "definition of done is frozen; only the owner changes it on main"
-            exit 1
-          fi
-          # Judge the PR by main's definition of done, never its own.
-          rm -rf tests/acceptance
-          git checkout origin/main -- done.sh tests/acceptance
-          nix develop -c ./done.sh
-  merge:
-    if: github.event_name == 'push'
-    needs: done
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
-    env:
-      GH_TOKEN: ${{ github.token }}
-      BRANCH: ${{ github.ref_name }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-      - run: |
-          [ "$(git rev-list --count origin/main..HEAD)" -gt 0 ] || exit 0
-          [ -n "$(gh pr list --head "$BRANCH" --base main --json number --jq '.[].number')" ] ||
-            gh pr create --head "$BRANCH" --base main --title "$BRANCH" --body "Opened by CI after done.sh passed."
-          gh pr merge "$BRANCH" --auto --rebase --delete-branch
-EOF
-
+# One release per push to main; its target is the pushed SHA, so `box reset --ref` can return to it.
 cat >.github/workflows/tag.yml <<'EOF'
 name: tag
 on:
   push:
     branches: [main]
+permissions:
+  contents: write
 jobs:
   tag:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
       - run: |
-          # Roll back to any earlier main with: git reset --hard merge-<n>
-          git tag --points-at HEAD | grep -q '^merge-' && exit 0
-          n=$(( $(git tag -l 'merge-*' | wc -l) + 1 ))
-          git tag "merge-$n"
-          git push origin "merge-$n"
+          pr="$(gh api "repos/$GH_REPO/commits/$GITHUB_SHA/pulls" --jq '.[0] | select(.) | "\(.title) (#\(.number))"')"
+          title="${pr:-$(gh api "repos/$GH_REPO/commits/$GITHUB_SHA" --jq '.commit.message | split("\n")[0]')}"
+          gh release create "merge-${{ github.run_number }}" --target "$GITHUB_SHA" --title "$title" --notes ""
 EOF
 
 command -v nix >/dev/null && nix --extra-experimental-features "nix-command flakes" flake lock 2>/dev/null || true
@@ -243,7 +261,6 @@ git add -A
 git commit -q -m "Initial commit"
 
 echo "==> Creating GitHub repo $owner/$name"
-repo="repos/$owner/$name"
 run gh repo create "$owner/$name" --public --source . --remote origin
 push=(git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push -q origin main)
 if $dry; then run "${push[@]}"; else
@@ -262,8 +279,7 @@ That is only the first step; the rest (settings, ruleset, collaborator, box) hav
   done
   rm -f "$log"
 fi
-run gh api -X PATCH "$repo" -F allow_auto_merge=true -F delete_branch_on_merge=true
-run gh api -X PUT "$repo/actions/permissions/workflow" -F can_approve_pull_request_reviews=true
+run gh api -X PATCH "$repo" -F delete_branch_on_merge=true
 run_in gh api -X POST "$repo/rulesets" --input - <<'EOF'
 {
   "name": "main",
@@ -272,15 +288,6 @@ run_in gh api -X POST "$repo/rulesets" --input - <<'EOF'
   "bypass_actors": [{ "actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always" }],
   "conditions": { "ref_name": { "include": ["~DEFAULT_BRANCH"], "exclude": [] } },
   "rules": [
-    { "type": "pull_request", "parameters": {
-        "required_approving_review_count": 0,
-        "dismiss_stale_reviews_on_push": false,
-        "require_code_owner_review": false,
-        "require_last_push_approval": false,
-        "required_review_thread_resolution": false } },
-    { "type": "required_status_checks", "parameters": {
-        "strict_required_status_checks_policy": true,
-        "required_status_checks": [{ "context": "done" }] } },
     { "type": "non_fast_forward" },
     { "type": "deletion" }
   ]
@@ -288,61 +295,7 @@ run_in gh api -X POST "$repo/rulesets" --input - <<'EOF'
 EOF
 run gh api -X PUT "$repo/collaborators/$agent" -f permission=push
 
-# %q makes the prompt one shell-safe word inside the unquoted heredoc below.
-qprompt=""; [ -z "$prompt" ] || qprompt="$(printf %q "$prompt")"
-
-# --- 2. Box side (machine add inside this step starts the box herdr server) ---
-echo "==> Creating box $name"
-run "$sandbox" new "$name"
-# herdr reaches the box over ssh; fail here with a hint rather than inside machine add.
-ssh_ok=false
-for _ in $(seq 10); do
-  run ssh -o BatchMode=yes "$name@orb" true && { ssh_ok=true; break; }
-  sleep 1
-done
-$ssh_ok || die "cannot ssh $name@orb non-interactively; add this to ~/.ssh/config:
-Host orb
-  HostName 127.0.0.1
-  Port 32222
-  User default
-  IdentityFile ~/.orbstack/ssh/id_ed25519
-  IdentitiesOnly yes
-  ForwardAgent no"
-# Before any pane exists: machine add starts the box's herdr server and may restart it, killing panes.
-# No tty on stdin keeps it non-interactive; a fresh box has herdr installed and no server, so nothing to confirm.
-run herdr machine add "ssh://$name@orb" --label "$name" --remote-session default </dev/null
-# The invite can lag behind the PUT above, so retry the accept.
-run_in "$sandbox" exec "$name" bash -s <<EOF
-set -euo pipefail
-for _ in \$(seq 30); do
-  id="\$(gh api user/repository_invitations --paginate --jq 'first(.[] | select(.repository.full_name == "$owner/$name") | .id) // empty')"
-  [ -z "\$id" ] || break
-  sleep 2
-done
-[ -n "\$id" ] || { echo "box: no invitation to $owner/$name found" >&2; exit 1; }
-gh api -X PATCH "user/repository_invitations/\$id"
-gh repo clone $owner/$name ~/$name
-cd ~/$name
-# Pre-accept folder trust so the agent never blocks on a dialog.
-mkdir -p ~/.claude
-[ -s ~/.claude.json ] || echo '{}' > ~/.claude.json
-jq --arg p "\$HOME/$name" '.projects[\$p].hasTrustDialogAccepted = true' ~/.claude.json > ~/.claude.json.tmp && mv ~/.claude.json.tmp ~/.claude.json
-for _ in \$(seq 30); do herdr workspace list >/dev/null 2>&1 && break; sleep 1; done
-pane="\$(herdr workspace create --cwd ~/$name --label $name --no-focus | jq -r .result.root_pane.pane_id)"
-# The pane's shell is busy loading direnv at first, so retry the start.
-for _ in \$(seq 120); do
-  herdr agent start $name --kind claude --pane "\$pane" >/dev/null 2>&1 && break
-  sleep 1
-done
-if [ -n "$qprompt" ]; then
-# agent_blocked means a dialog is up; retry for 60s, then warn and carry on (the pane stays attachable).
-sent=false
-for _ in \$(seq 30); do
-  herdr agent prompt $name $qprompt >/dev/null 2>&1 && { sent=true; break; }
-  sleep 2
-done
-\$sent || echo "box: agent still blocked after 60s, prompt not sent; answer it in herdr" >&2
-fi
-EOF
+# --- new, 2. Box side ---
+provision 1
 
 echo "box $name ready: github.com/$owner/$name"
