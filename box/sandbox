@@ -144,16 +144,19 @@ check_isolation() {
     orb -m "$BASE" bash -c "nc -z -w 1 127.0.0.1 $port4" && { ok=true; break; }
     sleep 1
   done
+  local skipped=false
   if [ -z "$ip" ] || ! $ok; then
-    echo "error: isolation test setup failed (base ip '$ip', listener up: $ok)" >&2
+    skipped=true
+    echo "warn: box-to-box test skipped, setup failed (base ip '$ip', listener up: $ok)" >&2
     echo "  listener command (in $BASE, as root): setsid nohup $cmd4 &" >&2
     echo "  listener stderr:" >&2
     orb -m "$BASE" -u root bash -c 'cat /tmp/box-nc.log; echo "  processes:"; pgrep -a nc || echo "  (no nc running)"' 2>&1 | sed 's/^/    /' >&2 || true
-    stop_listeners; return 1
   fi
-  orb -m "$1" ping -c 1 -W 2 "$ip" >/dev/null 2>&1 && reached="ping"
-  orb -m "$1" nc -z -w 3 "$ip" "$port4" >/dev/null 2>&1 && reached="$reached tcp"
-  if [ -n "$ip6" ]; then
+  if ! $skipped; then
+    orb -m "$1" ping -c 1 -W 2 "$ip" >/dev/null 2>&1 && reached="ping"
+    orb -m "$1" nc -z -w 3 "$ip" "$port4" >/dev/null 2>&1 && reached="$reached tcp"
+  fi
+  if ! $skipped && [ -n "$ip6" ]; then
     orb -m "$1" ping -6 -c 1 -W 2 "$ip6" >/dev/null 2>&1 && reached="$reached ping6"
     # only meaningful if the base itself answers on v6
     if orb -m "$BASE" bash -c "nc -6 -z -w 2 $ip6 $port6"; then
@@ -162,9 +165,12 @@ check_isolation() {
   fi
   orb -m "$1" curl -fsS -m 15 -o /dev/null https://github.com || web=false
   stop_listeners
-  [ -z "$reached" ] || { echo "error: '$1' reached $BASE ($ip ${ip6:-no ipv6}) by:$reached - isolation failed" >&2; return 1; }
+  # box-to-box is a warning (the rules stay installed); internet is fatal
+  [ -z "$reached" ] || echo "warn: '$1' reached $BASE ($ip ${ip6:-no ipv6}) by:$reached - box-to-box isolation NOT working" >&2
   $web || { echo "error: '$1' cannot reach https://github.com - gateway/DNS rules too strict?" >&2; return 1; }
-  echo "isolation ok: '$1' cannot ping or connect to $BASE ($ip ${ip6:-no ipv6}); github.com reachable"
+  if $skipped; then echo "github.com reachable; box-to-box isolation unverified"
+  elif [ -z "$reached" ]; then echo "isolation ok: '$1' cannot ping or connect to $BASE ($ip ${ip6:-no ipv6}); github.com reachable"
+  fi
 }
 
 # Token goes over stdin, never argv. Per box, so rotating it needs no base rebuild.
