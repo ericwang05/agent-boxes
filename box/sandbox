@@ -40,20 +40,64 @@ harden() {
     fi'
 }
 
-# Fail closed: a clone that can ping another machine is not isolated, so abort creation.
-# box-base is the target; it is started for the test and stopped again if it was not running.
+# Replace the base ruleset with the LAN block plus exceptions for this box's own gateway and DNS
+# inside OrbStack's two internal ranges. Everything else in them (other boxes, the host) is rejected.
+install_firewall() {
+  orb -m "$1" -u root bash -s <<'FW'
+set -euo pipefail
+allow="$({
+  ip -4 route show default | awk '$1 == "default" { for (i = 1; i < NF; i++) if ($i == "via") print $(i + 1) }'
+  cat /etc/resolv.conf /run/systemd/resolve/resolv.conf 2>/dev/null | awk '$1 == "nameserver" { print $2 }'
+} | grep -E '^(192\.168\.13[89]|198\.1[89])\.[0-9]+\.[0-9]+$' | sort -u | paste -sd, - || true)"
+rule=""; [ -z "$allow" ] || rule="ip daddr { $allow } accept comment \"this box gateway and dns\""
+cat > /etc/nftables.conf <<NFT
+#!/usr/sbin/nft -f
+flush ruleset
+table inet sandbox {
+  chain output {
+    type filter hook output priority 0; policy accept;
+    oifname "lo" accept
+    ct state established,related accept
+    meta l4proto ipv6-icmp accept
+    $rule
+    ip daddr { 192.168.138.0/23, 198.18.0.0/15 } counter reject comment "other orbstack machines"
+    ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16,
+               169.254.0.0/16, 100.64.0.0/10 } counter reject
+    ip6 daddr { fc00::/7, fe80::/10 } counter reject
+  }
+}
+NFT
+nft -c -f /etc/nftables.conf
+systemctl restart nftables
+echo "== nftables ruleset installed =="
+nft list ruleset
+FW
+}
+
+# Fail closed. box-base is the target (started for the test, stopped again if it was not running),
+# with a listener inside it so a failed TCP connect proves the rules, not a closed port.
 check_isolation() {
-  local base_up=false ip reached=false
-  orb -m "$1" bash -c 'command -v ping >/dev/null' \
-    || { echo "error: no ping in '$1' - rebuild the base (sandbox base) to get iputils-ping" >&2; return 1; }
+  local base_up=false ip reached=""
+  orb -m "$1" bash -c 'command -v ping nc curl >/dev/null' \
+    || { echo "error: '$1' lacks ping, nc or curl - rebuild the base (sandbox base)" >&2; return 1; }
   orb list 2>/dev/null | awk -v n="$BASE" '$1 == n && $2 == "running" { f=1 } END { exit !f }' && base_up=true
   $base_up || orb start "$BASE"
   ip="$(orb -m "$BASE" hostname -I | awk '{print $1}')"
-  if [ -n "$ip" ] && orb -m "$1" ping -c 1 -W 2 "$ip" >/dev/null 2>&1; then reached=true; fi
+  orb -m "$BASE" -u root bash -c 'setsid nohup nc -lk 4444 >/dev/null 2>&1 < /dev/null &'
+  sleep 1
+  if [ -z "$ip" ] || ! orb -m "$BASE" bash -c 'nc -z -w 2 127.0.0.1 4444'; then
+    $base_up || orb stop "$BASE"
+    echo "error: isolation test setup failed (base ip '$ip' or test listener)" >&2; return 1
+  fi
+  orb -m "$1" ping -c 1 -W 2 "$ip" >/dev/null 2>&1 && reached="ping"
+  orb -m "$1" nc -z -w 3 "$ip" 4444 >/dev/null 2>&1 && reached="$reached tcp"
+  local web=true
+  orb -m "$1" curl -fsS -m 15 -o /dev/null https://github.com || web=false
+  orb -m "$BASE" -u root pkill -f 'nc -lk 4444' || true
   $base_up || orb stop "$BASE"
-  [ -n "$ip" ] || { echo "error: could not get $BASE's IP to test isolation" >&2; return 1; }
-  ! $reached || { echo "error: '$1' can ping $BASE ($ip): network isolation is not working" >&2; return 1; }
-  echo "isolation ok: '$1' cannot reach $BASE ($ip)"
+  [ -z "$reached" ] || { echo "error: '$1' reached $BASE ($ip) by:$reached - isolation failed" >&2; return 1; }
+  $web || { echo "error: '$1' cannot reach https://github.com - gateway/DNS rules too strict?" >&2; return 1; }
+  echo "isolation ok: '$1' cannot ping or connect to $BASE ($ip); github.com reachable"
 }
 
 # Token goes over stdin, never argv. Per box, so rotating it needs no base rebuild.
@@ -105,6 +149,7 @@ STEPS
     # config is read at boot, so restart the clone before testing it
     orb stop "$name" >/dev/null 2>&1 || true
     orb start "$name"
+    install_firewall "$name"
     check_isolation "$name"
     inject_token "$name"
     harden "$name"

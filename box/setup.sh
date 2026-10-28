@@ -10,7 +10,7 @@ as_user() { runuser -u "$SETUP_USER" -- bash -lc "$1"; }
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends \
-    git curl ca-certificates jq ripgrep less procps unzip nftables sudo gh iputils-ping
+    git curl ca-certificates jq ripgrep less procps unzip nftables sudo gh iputils-ping netcat-openbsd
 
 # --- Determinate Nix: multi-user daemon, so the sandbox user needs no sudo ---
 curl -fsSL https://install.determinate.systems/nix | sh -s -- install linux --no-confirm
@@ -41,8 +41,9 @@ git config --system user.email "45795682+ericwang05@users.noreply.github.com"
 git config --system credential.helper store
 
 # --- Egress firewall: allow internet, block LAN ---
-# 192.168.138.0/23 and 198.18.0.0/15 are OrbStack's internal ranges (Settings >
-# Network); other machines/host there are blocked by --isolate-network.
+# 192.168.138.0/23 and 198.18.0.0/15 are OrbStack's internal ranges. They are
+# rejected here like any LAN; `sandbox new` adds back only each box's own
+# gateway and DNS, so boxes cannot reach each other.
 cat > /etc/nftables.conf << 'EOF2'
 #!/usr/sbin/nft -f
 flush ruleset
@@ -52,8 +53,7 @@ table inet sandbox {
     oifname "lo" accept
     ct state established,related accept
     meta l4proto ipv6-icmp accept
-    ip daddr { 192.168.138.0/23, 198.18.0.0/15 } accept comment "orbstack internal"
-    ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16,
+    ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 198.18.0.0/15,
                169.254.0.0/16, 100.64.0.0/10 } counter reject
     ip6 daddr { fc00::/7, fe80::/10 } counter reject
   }
