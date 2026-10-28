@@ -305,12 +305,12 @@ run_in "$sandbox" exec "$name" bash -s <<EOF
 set -euo pipefail
 [ -n "\${GH_TOKEN:-}" ] || { echo "box: GH_TOKEN (agent token) missing in the box" >&2; exit 1; }
 for _ in \$(seq 30); do
-  id="\$(gh api /user/repository_invitations --jq '.[] | select(.repository.full_name == "$owner/$name") | .id')"
+  id="\$(gh api user/repository_invitations --paginate --jq 'first(.[] | select(.repository.full_name == "$owner/$name") | .id) // empty')"
   [ -z "\$id" ] || break
   sleep 2
 done
 [ -n "\$id" ] || { echo "box: no invitation to $owner/$name found" >&2; exit 1; }
-gh api -X PATCH "/user/repository_invitations/\$id"
+gh api -X PATCH "user/repository_invitations/\$id"
 # GH_TOKEN alone is not enough: herdr panes may not source /etc/profile.d. gh refuses to store a token while GH_TOKEN is set.
 printf %s "\$GH_TOKEN" | env -u GH_TOKEN gh auth login --with-token
 gh auth setup-git
