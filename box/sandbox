@@ -40,6 +40,22 @@ harden() {
     fi'
 }
 
+# Fail closed: a clone that can ping another machine is not isolated, so abort creation.
+# box-base is the target; it is started for the test and stopped again if it was not running.
+check_isolation() {
+  local base_up=false ip reached=false
+  orb -m "$1" bash -c 'command -v ping >/dev/null' \
+    || { echo "error: no ping in '$1' - rebuild the base (sandbox base) to get iputils-ping" >&2; return 1; }
+  orb list 2>/dev/null | awk -v n="$BASE" '$1 == n && $2 == "running" { f=1 } END { exit !f }' && base_up=true
+  $base_up || orb start "$BASE"
+  ip="$(orb -m "$BASE" hostname -I | awk '{print $1}')"
+  if [ -n "$ip" ] && orb -m "$1" ping -c 1 -W 2 "$ip" >/dev/null 2>&1; then reached=true; fi
+  $base_up || orb stop "$BASE"
+  [ -n "$ip" ] || { echo "error: could not get $BASE's IP to test isolation" >&2; return 1; }
+  ! $reached || { echo "error: '$1' can ping $BASE ($ip): network isolation is not working" >&2; return 1; }
+  echo "isolation ok: '$1' cannot reach $BASE ($ip)"
+}
+
 # Token goes over stdin, never argv. Per box, so rotating it needs no base rebuild.
 inject_token() {
   { tr -d '[:space:]' < "$ACCOUNT_FILE"; echo; tr -d '[:space:]' < "$TOKEN_FILE"; echo; } |
@@ -82,10 +98,14 @@ STEPS
     [ -r "$TOKEN_FILE" ] || { echo "error: no agent token at $TOKEN_FILE" >&2; exit 1; }
     [ -r "$ACCOUNT_FILE" ] || { echo "error: no agent username at $ACCOUNT_FILE" >&2; exit 1; }
     trap 'orb delete -f "$name" >/dev/null 2>&1 || true; echo "error: creation failed, cleaned up" >&2' ERR
+    orb config set "machine.$BASE.isolate_network" true
     orb clone "$BASE" "$name"
     orb config set "machine.$name.isolated" true
     orb config set "machine.$name.isolate_network" true
+    # config is read at boot, so restart the clone before testing it
+    orb stop "$name" >/dev/null 2>&1 || true
     orb start "$name"
+    check_isolation "$name"
     inject_token "$name"
     harden "$name"
     trap - ERR
