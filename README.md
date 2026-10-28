@@ -80,7 +80,7 @@ Everything Claude-related inside boxes comes from **`box/claude/`**, which is co
 | File | What it controls |
 | --- | --- |
 | `box/claude/settings.json` | plugins (`enabledPlugins` plus their `extraKnownMarketplaces`), permission mode, other Claude settings |
-| `box/claude/rules/` | rule files, for example pstack's model choices |
+| `box/claude/rules/` | optional rule files copied into every box |
 | `box/claude/CLAUDE.md` | optional instructions for every box agent |
 
 Change a file, commit, run `box base`, and new boxes get it. **Never put tokens here:** this repo is public, and `box base` refuses to run if it finds anything that looks like one.

@@ -76,7 +76,7 @@ It cleans up after itself, so just read the error and run it again. To keep a fa
 2. Commit, then run `box base`.
 3. New boxes have it. For an existing box, run `box reset <name>`.
 
-To save a plugin's own settings, such as pstack's models, run its setup once in the base (`ssh box-base@orb`, then `claude`), then copy the file it writes into `box/claude/rules/`.
+Plugin settings that differ per project (such as pstack's models) belong in that project, not in `box/claude/`.
 
 ### Rebuild the base
 ```sh
