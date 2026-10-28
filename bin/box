@@ -132,13 +132,13 @@ printf '.direnv/\n.DS_Store\nresult\n' >.gitignore
 chmod +x done.sh
 mkdir -p tests/acceptance .github/workflows
 : >tests/acceptance/.gitkeep
-printf '%s\n' /.github/ /done.sh /tests/acceptance/ | sed "s/\$/ @$owner/" >.github/CODEOWNERS
 
 cat >AGENTS.md <<EOF
 # $name
 
 - Work on branch \`agent\` and push often. CI merges to \`main\` when \`done.sh\` passes.
-- Never edit \`.github/\`. Edit \`done.sh\` and \`tests/acceptance/\` only when I explicitly ask you to define or change "done".
+- Never edit \`.github/\`. Edit \`done.sh\` and \`tests/acceptance/\` only when I explicitly ask you to define or change "done", and only while main's \`done.sh\` is still the empty placeholder: after that CI rejects such PRs and only I change them on main.
+- Open small PRs, one change each. Use the pstack \`poteto-mode\` Autopilot-full playbook (\`playbooks/autopilot-full.md\`) for queues of PRs, and its Shipping playbook (\`playbooks/shipping.md\`) to verify before landing.
 - Python packages go in \`pyproject.toml\` via \`uv\`; system tools go in \`flake.nix\`.
 - CI rebase-merges. Before every push run \`git fetch origin && git rebase origin/main\` on branch \`agent\`; already-merged commits drop out and the up-to-date check passes.
 - If blocked, write \`REPORT.md\` (done / blocked + why / what you need), push, stop.
@@ -149,13 +149,14 @@ cat >.github/workflows/done.yml <<'EOF'
 name: done
 on:
   push:
-    branches: [agent]
+    branches: [agent, main]
   pull_request:
     branches: [main]
 permissions:
   contents: read
 jobs:
   done:
+    if: github.ref != 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -173,6 +174,11 @@ jobs:
             fi
             echo "bootstrap: spec-only change, nothing to run"
             exit 0
+          fi
+          # Trust on first use: once main has a real done.sh, only the owner changes it, on main.
+          if git diff --name-only origin/main...HEAD | grep -q -E '^(done\.sh|tests/acceptance/)'; then
+            echo "definition of done is frozen; only the owner changes it on main"
+            exit 1
           fi
           # Judge the PR by main's definition of done, never its own.
           rm -rf tests/acceptance
@@ -196,6 +202,21 @@ jobs:
           [ -n "$(gh pr list --head agent --base main --json number --jq '.[].number')" ] ||
             gh pr create --head agent --base main --title "agent" --body "Opened by CI after done.sh passed."
           gh pr merge agent --auto --rebase
+  tag:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - run: |
+          # Roll back to any earlier main with: git reset --hard merge-<n>
+          git tag --points-at HEAD | grep -q '^merge-' && exit 0
+          n=$(( $(git tag -l 'merge-*' | wc -l) + 1 ))
+          git tag "merge-$n"
+          git push origin "merge-$n"
 EOF
 
 command -v nix >/dev/null && nix --extra-experimental-features "nix-command flakes" flake lock 2>/dev/null || true
@@ -213,12 +234,13 @@ run_in gh api -X POST "$repo/rulesets" --input - <<'EOF'
   "name": "main",
   "target": "branch",
   "enforcement": "active",
+  "bypass_actors": [{ "actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always" }],
   "conditions": { "ref_name": { "include": ["~DEFAULT_BRANCH"], "exclude": [] } },
   "rules": [
     { "type": "pull_request", "parameters": {
         "required_approving_review_count": 0,
         "dismiss_stale_reviews_on_push": false,
-        "require_code_owner_review": true,
+        "require_code_owner_review": false,
         "require_last_push_approval": false,
         "required_review_thread_resolution": false } },
     { "type": "required_status_checks", "parameters": {
