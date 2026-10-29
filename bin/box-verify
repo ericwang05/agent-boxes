@@ -95,18 +95,41 @@ else
 fi
 git_ clone -q "https://github.com/$repo.git" "$tmp/r" >/dev/null 2>&1 || { emit FAIL "clone $repo"; exit 0; }
 cd "$tmp/r"
-git -c user.name=verify -c user.email=verify@example.invalid commit -q --allow-empty -m "verify probe" \
+# Fixed dates make the probe the same commit on every run, so the control push to agent/test is never a non-fast-forward.
+GIT_AUTHOR_DATE=2000-01-01T00:00:00Z GIT_COMMITTER_DATE=2000-01-01T00:00:00Z \
+  git -c user.name=verify -c user.email=verify@example.invalid commit -q --allow-empty -m "verify probe" \
   || { emit FAIL "local probe commit"; exit 0; }
 
-# The merge attempt goes first. Anything but a 4xx refusal means the ruleset failed: stop the whole run at once.
-code=$(call PUT "$api/pulls/$pr/merge" "$tmp/o.json" -H 'Content-Type: application/json' --data '{"merge_method":"merge"}')
+# A merge test on a PR that is already merged or closed proves nothing, so it needs an open, unapproved one.
+call GET "$api/pulls/$pr" "$tmp/pr.json" >/dev/null
+if [ "$(jq -r '.state' "$tmp/pr.json" 2>/dev/null)" = open ]; then
+  # The merge attempt goes first. Anything but a 4xx refusal means the ruleset failed: stop the whole run at once.
+  code=$(call PUT "$api/pulls/$pr/merge" "$tmp/o.json" -H 'Content-Type: application/json' --data '{"merge_method":"merge"}')
+  case $code in
+    4??) emit PASS "merge PR #$pr rejected ($code)" ;;
+    *) emit FAIL "STOP: merge of PR #$pr was NOT refused ($code)"; exit 0 ;;
+  esac
+  # The PR's author is this same App, and an author cannot approve its own PR.
+  api_check "approve PR #$pr" POST "$api/pulls/$pr/reviews" "$tmp/o.json" \
+    -H 'Content-Type: application/json' --data '{"event":"APPROVE"}'
+else
+  emit SKIP "merge and approve checks (PR #$pr is not open; pass VERIFY_PR=<an open, unapproved PR>)"
+fi
+
+# Another repo in the same installation. The token is minted for $repo only, so it must not reach $other.
+# $other is public, so a plain read can never be refused: check the token's scope list and a read that needs push access.
+other=ericwang05/test2
+if jq -e --arg r "$other" '[.repositories[].full_name] | index($r) == null' "$tmp/inst.json" >/dev/null 2>&1; then
+  emit PASS "token scope does not list $other"
+else emit FAIL "STOP: token scope lists $other"; exit 0; fi
+code=$(call GET "https://api.github.com/repos/$other/collaborators" "$tmp/o.json")
 case $code in
-  4??) emit PASS "merge PR #$pr rejected ($code)" ;;
-  *) emit FAIL "STOP: merge of PR #$pr was NOT refused ($code)"; exit 0 ;;
+  4??) emit PASS "read of $other that needs push access refused ($code)" ;;
+  *) emit FAIL "STOP: read of $other that needs push access was NOT refused ($code)"; exit 0 ;;
 esac
-# The PR's author is this same App, and an author cannot approve its own PR.
-api_check "approve PR #$pr" POST "$api/pulls/$pr/reviews" "$tmp/o.json" \
-  -H 'Content-Type: application/json' --data '{"event":"APPROVE"}'
+if git_ push -q "https://github.com/$other.git" HEAD:refs/heads/agent/verify-probe >/dev/null 2>&1; then
+  emit FAIL "STOP: push to $other was NOT refused"; exit 0
+else emit PASS "push to $other refused"; fi
 
 git_check "direct push to main" push -q origin HEAD:refs/heads/main
 git_check "delete main by git push" push -q origin :refs/heads/main
@@ -125,8 +148,8 @@ fi
 
 if [ "$wrote" = 1 ]; then emit SKIP "control push (not attempted: an earlier write was accepted)"
 elif [ "${VERIFY_ALLOW_WRITE:-0}" != 1 ]; then emit SKIP "control push (set VERIFY_ALLOW_WRITE=1 to run it)"
-elif git_ push -q origin HEAD:refs/heads/agent/test >/dev/null 2>&1; then emit PASS "control push to agent/test accepted"
-else emit FAIL "control push to agent/test accepted"; fi
+elif cb="agent/verify-$(git rev-parse --short HEAD~1)"; git_ push -q origin "HEAD:refs/heads/$cb" >/dev/null 2>&1; then emit PASS "control push to a side branch accepted"
+else emit FAIL "control push to a side branch accepted"; fi # named after main's commit, so reruns at the same main are not non-fast-forward
 exit 0
 EOF
 
@@ -190,7 +213,7 @@ group2() {
 
 group3() {
   local f="$res/30-group3" out
-  out=$(printf '%s\n' "$tok" | orb -m "$name" env VERIFY_ALLOW_WRITE="$allow" bash -c "$G3" 2>/dev/null) \
+  out=$(printf '%s\n' "$tok" | orb -m "$name" env VERIFY_ALLOW_WRITE="$allow" VERIFY_PR="${VERIFY_PR:-1}" bash -c "$G3" 2>/dev/null) \
     || rec "$f" FAIL "GitHub checks did not run"
   keep "$out" "$f"
   case $out in *"FAIL: STOP"*) : >"$res/stop" ;; esac
