@@ -44,12 +44,14 @@ Tell the agent "add `<tool>` to `flake.nix`". For language packages, it uses tha
 
 ### Bad code landed on main
 - **Undo specific commits:** ask an agent to "revert commits `<sha>`…`<sha>` in one PR."
-- **Jump back to a good commit.** Find it in the repo's commit history on GitHub, or with `git log`, then:
+- **Jump back to a good commit.** Find it in the repo's commit history on GitHub, or with `git log`, then roll back with a revert PR (`main` can't be force-pushed):
   ```sh
   git clone https://github.com/<owner>/myapp /tmp/fix && cd /tmp/fix
-  git push --force origin <good-commit>:main
+  git switch -c rollback
+  git read-tree -u --reset <good-commit> && git commit -m "Roll back to <good-commit>"
+  git push -u origin rollback && gh pr create --fill
   ```
-  You're the only one the rules allow to do this. In that clone, run `git push` and nothing else.
+  Merge that PR yourself; the rules let you merge your own pull requests. If it can't be done as a PR, pause the ruleset instead: repo Settings → Rules → Rulesets → `main` → Enforcement: Disabled, fix `main`, then set it back to Active.
 - **Fresh box from that commit:** `box reset myapp --ref <good-commit>`.
 
 ### You suspect a box was compromised

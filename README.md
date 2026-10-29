@@ -23,7 +23,7 @@ box new myapp      # repo + box + herdr workspace, ready in about a minute
 
 ## What you get
 
-- **A public GitHub repo** with an empty Nix flake (`flake.nix`, `.envrc`, `flake.lock`). History is protected: nobody but you can force-push or delete `main`.
+- **A public GitHub repo** with an empty Nix flake (`flake.nix`, `.envrc`, `flake.lock`). History is protected: `main` only changes through a pull request that needs one approval (you can merge your own), and nobody can push to it directly, force-push it or delete it.
 - **An isolated box:** an OrbStack Linux machine with Claude Code, herdr and Nix, plus your Claude settings and plugins from `box/claude/`.
 - **A herdr workspace** already in the repo. Run `claude` there and you're working. Nothing starts on its own.
 
