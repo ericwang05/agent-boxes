@@ -104,7 +104,7 @@ This picks up updates to Nix, herdr, Claude Code and your `box/claude/`. Existin
 | --- | --- |
 | Monthly | `box base` |
 | Every 90 days | Only if you still use `--classic` boxes: the agent token expires. Make a new one, save it to `.agent-token`, then `box reset` active projects |
-| Before overnight runs | Keep the Mac plugged in and awake. Boxes pause when the Mac sleeps and tokens go stale, then the refresher catches up right after wake. To stay awake: `caffeinate -i -t 28800` (8 hours) |
+| Before overnight runs | Keep the Mac plugged in and awake. Boxes pause when the Mac sleeps and tokens go stale, then the refresher catches up within a minute of wake. To stay awake: `caffeinate -i -t 28800` (8 hours) |
 | Every year | The Claude token from `claude setup-token` expires after about a year. Set a calendar reminder a month early, then run `claude setup-token`, save it to `~/agent-boxes/.claude-token` and `box reset` active projects |
 | After a Mac restart | The launchd job should start the refresher when you log in (not yet tested). Check `~/Library/Logs/agent-boxes/refresh.log` for `ok` lines |
 | Weekly | Check your Claude plan usage, which all boxes share |

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # box-refresh --once | --daemon | --print-plist: keep every running App-path box supplied with a fresh GitHub token.
-# --once: one full tick (manual test). --daemon (what launchd runs): a full tick every 30 min and right after a wake
-# from sleep, plus a 1-minute pass that restores any running box whose token file is missing (restart, reboot).
+# --once: one full tick (manual test). --daemon (what launchd runs): a full tick every 30 min (so one is due as soon
+# as the Mac wakes from a long sleep), plus a 1-minute pass that restores any running box whose token file is missing (restart, reboot).
 # Logs box name, repos and expiry only. A token lives in a shell variable and a pipe: never argv, a log or a file.
 set -uo pipefail # no -e: one box failing must not stop the others
 
@@ -109,17 +109,13 @@ pass() {
   unlock
 }
 
-# A jump in wall-clock time across one sleep means the Mac slept: tick at once, then resume the 30-minute cadence.
 daemon() {
-  local step=${STEP_SECONDS:-60} every=${TICK_SECONDS:-1800} last=0 now before after
+  local step=${STEP_SECONDS:-60} every=${TICK_SECONDS:-1800} last=0 now
   log "refresher started (full tick every ${every}s, restore check every ${step}s)"
   while :; do
     now=$(date +%s)
     if [ $((now - last)) -ge "$every" ]; then pass 3 all; last=$(date +%s); else pass 1 missing; fi
-    before=$(date +%s); sleep "$step"; after=$(date +%s)
-    if [ $((after - before)) -gt $((step * 3)) ]; then
-      log "woke from sleep ($((after - before))s gap), ticking now"; last=0
-    fi
+    sleep "$step"
   done
 }
 
