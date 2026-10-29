@@ -14,7 +14,8 @@ Find what you're trying to do, then run what it says. Commands run on your Mac u
 
 ### Start a project
 ```sh
-box new myapp
+box new myapp                                # a new repo and box
+box new myapp --repo <owner>/<existing>      # a box on a repo you already have (the repo is not changed)
 ```
 Open herdr, press `prefix+w`, pick `myapp`, then run `claude` in its workspace. The first instruction is yours. To start pstack, begin your message with `/pstack:poteto-mode`.
 
@@ -27,12 +28,19 @@ Open herdr, press `prefix+w`, pick `myapp`, then run `claude` in its workspace. 
 ### Add tools to a project
 Tell the agent "add `<tool>` to `flake.nix`". For language packages, it uses that language's own tool, such as `uv`, `npm` or `cargo`. The shell reloads by itself.
 
+### Review and merge what agents send
+Agents open pull requests and never merge. You review each one on GitHub.
+- **Approve and merge** it in the GitHub UI, as usual.
+- **Merge one without approving it** (your own PR, or a throwaway): `gh pr merge <number> --admin --merge`. Tested on a throwaway repo: it merges as you with the review still "required". Without `--admin`, `gh` refuses. The web UI's bypass option for this is untested.
+
 ### Finish a project
 
 | You want | Run |
 | --- | --- |
-| Keep the repo, revoke the agent | `box retire myapp` |
-| Delete everything, repo included | `box destroy myapp` |
+| Keep the repo, stop giving the box tokens | `box retire myapp` |
+| Delete everything, repo included | `box destroy myapp` (not for boxes made with `--repo`; retire those) |
+
+`retire` stops the refresher minting for the box. Its last token still lives up to an hour; to cut off sooner, use `box panic`.
 
 ---
 
@@ -55,9 +63,10 @@ Tell the agent "add `<tool>` to `flake.nix`". For language packages, it uses tha
 - **Fresh box from that commit:** `box reset myapp --ref <good-commit>`.
 
 ### You suspect a box was compromised
-1. **Stop it:** `orb stop myapp`.
-2. **Revoke and replace both tokens.** That's what cuts off anything it copied:
-   - **GitHub:** sign in as the agent account → Settings → Developer settings → Tokens (classic) → revoke. Create a new token (`public_repo` and `repo:invite`) and save it to `~/agent-boxes/.agent-token`.
+1. **Stop it:** `orb stop myapp`, or `box panic` to stop every box and the refresher.
+2. **Cut off the tokens.** That's what stops anything it copied:
+   - **GitHub (App):** a box token dies within an hour on its own. To cut it off now: github.com/settings/installations → eric-w-agent → Configure → Suspend (reversible) or Uninstall. If the private key may have leaked, delete it under the App's settings → Private keys, and make a new one for `app.pem`. Revoking a single token can lag on git, so don't rely on it.
+   - **GitHub (legacy `--classic` boxes):** sign in as the agent account → Settings → Developer settings → Tokens (classic) → revoke. Create a new token (`public_repo` and `repo:invite`) and save it to `~/agent-boxes/.agent-token`.
    - **Claude:** revoke the old token in your Claude account settings, then run `claude setup-token` and save the new one to `~/agent-boxes/.claude-token`.
 3. **Check what it touched:** recent commits and pull requests in this project, your other box projects, and the agent account's profile.
 4. **Fix `main`** if needed (see above), then `box reset myapp --ref <good-commit>`.
@@ -67,7 +76,8 @@ It cleans up after itself, so just read the error and run it again. To keep a fa
 
 ### Stop everything
 - **One box:** `orb stop <name>`
-- **All boxes:** quit OrbStack
+- **All boxes and the refresher:** `box panic`. It sets `~/.config/agent-boxes/state/panic`; to resume, delete that file, start the boxes and reload the launchd job. It does not suspend the GitHub App.
+- **Everything, no questions:** quit OrbStack
 
 ---
 
@@ -93,8 +103,10 @@ This picks up updates to Nix, herdr, Claude Code and your `box/claude/`. Existin
 | When | Do |
 | --- | --- |
 | Monthly | `box base` |
-| Every 90 days | The agent token expires. Make a new one, save it to `.agent-token`, then `box reset` active projects |
-| Before overnight runs | Keep the Mac plugged in and awake |
+| Every 90 days | Only if you still use `--classic` boxes: the agent token expires. Make a new one, save it to `.agent-token`, then `box reset` active projects |
+| Before overnight runs | Keep the Mac plugged in and awake. Boxes pause when the Mac sleeps and tokens go stale, then the refresher catches up right after wake. To stay awake: `caffeinate -i -t 28800` (8 hours) |
+| Every year | The Claude token from `claude setup-token` expires after about a year. Set a calendar reminder a month early, then run `claude setup-token`, save it to `~/agent-boxes/.claude-token` and `box reset` active projects |
+| After a Mac restart | The launchd job should start the refresher when you log in (not yet tested). Check `~/Library/Logs/agent-boxes/refresh.log` for `ok` lines |
 | Weekly | Check your Claude plan usage, which all boxes share |
 | When a project ends | `box retire` or `box destroy` |
 
@@ -108,7 +120,11 @@ This picks up updates to Nix, herdr, Claude Code and your `box/claude/`. Existin
 | `Could not resolve hostname orb` | Add the `Host orb` entry from the README to `~/.ssh/config` |
 | A box looks empty, or `sudo` works | You typed a box name that doesn't exist, and OrbStack connected you to its default machine instead. Check `orb list` |
 | `repo … already exists` | Existing project: `box reset <name>`. Starting over: `box destroy <name>` |
-| `agent cannot push … 403` | Check the agent token has `repo:invite`, then `box destroy` and `box new` |
+| `agent cannot push … 403` | Legacy `--classic` box: check the agent token has `repo:invite`, then `box destroy` and `box new` |
+| `mint failed: HTTP 422 … does not exist or is not accessible` | The registry file for the box names a repo that doesn't exist or the App can't reach. Check `~/.config/agent-boxes/boxes/<name>.json` |
+| `box: no App token in the box` or a box has no `/run/agent/gh-token` | The refresher restores it within a minute if it is running. If not, load the launchd job (README, setup step 7) or run `bin/box-refresh --once` |
+| `panic flag set, not refreshing` in the refresher log | You ran `box panic`. Delete `~/.config/agent-boxes/state/panic` to resume |
+| `mint failed: HTTP 401` | The App's key or ids in `~/.config/agent-boxes` are wrong, the key was deleted, or the App is suspended |
 | `line 2: Wang: command not found` | Quote values with spaces in `~/.config/agent-boxes/config` |
 | `claude: command not found` in a box | Open a login shell with `ssh <name>@orb`, or run `box base` |
 | A paste seems to do nothing | Token prompts hide what you type. Press Enter |
@@ -125,3 +141,13 @@ curl -m 3 -s http://192.168.1.1 >/dev/null && echo "home: REACHABLE" || echo "ho
 sudo -n true 2>/dev/null && echo "sudo: WORKS" || echo "sudo: blocked"
 ```
 You want `200`, then `blocked` three times.
+
+## Check a box's GitHub access by hand
+Only for the throwaway repos `test`, `test2` and `test3` (it attempts forbidden writes on purpose). Open an unapproved pull request from the box first, then:
+```sh
+VERIFY_PR=<number> VERIFY_ALLOW_WRITE=1 bin/box-verify <box>
+```
+Every line should say `PASS`.
+
+## Retiring the legacy agent account
+Do this in order: a clean overnight run on App tokens, then a week of clean `refresh.log`, then remove the `--classic` path from the code (your call), then revoke the agent token, and delete the account last.
