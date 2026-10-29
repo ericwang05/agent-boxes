@@ -20,8 +20,9 @@ dir="${TOKEN_DIR:-/run/agent}"  # TOKEN_DIR is for tests only
 data=$(cat; echo x); data=${data%x}
 data=${data%$'\n'}  # strip exactly one trailing newline
 [[ "$data" != *$'\n'* && "$data" != *$'\r'* ]] || { echo "error: expected exactly one line" >&2; exit 1; }
-# length checked apart from the regex: ERE repeat counts are capped (255) on some libcs
-[[ "$data" =~ ^ghs_[A-Za-z0-9_]+$ && ${#data} -ge 24 && ${#data} -le 1028 ]] \
+# Real tokens are ~390 chars and contain dots (JWT-like), so allow . and -; length is checked apart from
+# the regex because ERE repeat counts are capped (255) on some libcs.
+[[ "$data" =~ ^ghs_[A-Za-z0-9_.-]+$ && ${#data} -ge 24 && ${#data} -le 1028 ]] \
   || { echo "error: input is not a ghs_ installation token" >&2; exit 1; }
 if [ "$(id -u)" = 0 ]; then install -d -o root -g root -m 755 "$dir"; else mkdir -p "$dir"; fi
 tmp=$(mktemp "$dir/.gh-token.XXXXXX")

@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# box-refresh --once | --daemon | --print-plist: keep every running App-path box supplied with a fresh GitHub token.
+# --once: one full tick (manual test). --daemon (what launchd runs): a full tick every 30 min and right after a wake
+# from sleep, plus a 1-minute pass that restores any running box whose token file is missing (restart, reboot).
+# Logs box name, repos and expiry only. A token lives in a shell variable and a pipe: never argv, a log or a file.
+set -uo pipefail # no -e: one box failing must not stop the others
+
+HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
+MINT="$HERE/box-mint"
+SANDBOX="${BOX_SANDBOX:-$HERE/../box/sandbox}"
+ORB="${ORB:-$(command -v orb || echo /opt/homebrew/bin/orb)}"
+JQ="${JQ:-$(command -v jq || echo /usr/bin/jq)}"
+SH="${BASH:-/bin/bash}" # run the helper scripts with the same bash, not whatever `env bash` finds under launchd
+CFG="${BOX_CONFIG_DIR:-$HOME/.config/agent-boxes}"
+REG="$CFG/boxes" STATE="$CFG/state"
+LOG="${BOX_LOG:-$HOME/Library/Logs/agent-boxes/refresh.log}"
+LABEL=dev.agent-boxes.refresh
+# launchd starts with a bare environment, so name every tool's directory here.
+PATH="$(dirname "$ORB"):$(dirname "$JQ"):/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"; export PATH
+
+log() {
+  local line
+  line="$(printf '%s %s' "$(date -u +%FT%TZ)" "$*" | sed -E 's/(ghs_|ghp_|github_pat_|sk-ant-)[A-Za-z0-9_-]+/\1<redacted>/g')"
+  echo "$line" >>"$LOG"
+  [ -z "${VERBOSE:-}" ] || echo "$line" >&2
+}
+
+# mkdir is atomic; a lock whose pid is dead is stale and gets replaced.
+lock() {
+  if ! mkdir "$STATE/lock" 2>/dev/null; then
+    ! kill -0 "$(cat "$STATE/lock/pid" 2>/dev/null)" 2>/dev/null || return 1
+    rm -rf "$STATE/lock"; mkdir "$STATE/lock" 2>/dev/null || return 1
+  fi
+  echo $$ >"$STATE/lock/pid"
+}
+unlock() { [ "$(cat "$STATE/lock/pid" 2>/dev/null)" != "$$" ] || rm -rf "$STATE/lock"; }
+trap unlock EXIT
+
+# Kill a hung command so one stuck box cannot block the rest.
+# shortcut: kills only the subshell, an orphaned orb child may outlive it; fine until a box hangs often.
+with_timeout() {
+  local secs=$1 p w rc; shift
+  "$@" & p=$!
+  ( sleep "$secs"; kill "$p" 2>/dev/null ) & w=$!
+  wait "$p"; rc=$?
+  kill "$w" 2>/dev/null; wait "$w" 2>/dev/null
+  return $rc
+}
+
+# mint -> shell variable -> seed's stdin. mint's stderr (expires_at or an error, never a token) goes to $ERRF.
+mint_seed() {
+  local tok
+  tok="$("$SH" "$MINT" "$1" 2>"$ERRF" </dev/null)" || return 1
+  printf '%s\n' "$tok" | "$SH" "$SANDBOX" seed "$1" 2>>"$ERRF"
+}
+
+warn_if_expiring() {
+  local b=$1 exp=0
+  [ ! -r "$STATE/$b.expiry" ] || exp=$(cat "$STATE/$b.expiry")
+  [ $((exp - $(date +%s))) -lt 600 ] || return 0
+  # at most one notification per box per 10 minutes
+  [ -z "$(find "$STATE/$b.notified" -mmin -10 2>/dev/null)" ] || return 0
+  : >"$STATE/$b.notified"
+  /usr/bin/osascript -e "display notification \"$b has under 10 minutes of GitHub token left\" with title \"agent-boxes\"" >/dev/null 2>&1 || true
+}
+
+# $1 box, $2 attempts. Retries with backoff; the first token error line is logged, never the token.
+refresh_box() {
+  local b=$1 tries=$2 n=1 delay=2 repos iso exp
+  repos=$("$JQ" -r '.repos | join(",")' "$REG/$b.json" 2>/dev/null) || repos=unreadable-registry
+  ERRF=$(mktemp "$STATE/err.XXXXXX")
+  while :; do
+    if with_timeout 90 mint_seed "$b"; then
+      iso=$(sed -n 's/^expires_at=//p' "$ERRF" | head -n1)
+      exp=$(date -j -u -f %Y-%m-%dT%H:%M:%SZ "$iso" +%s 2>/dev/null) && echo "$exp" >"$STATE/$b.expiry"
+      log "box=$b repos=$repos expires=${iso:-unknown} ok"
+      rm -f "$ERRF" "$STATE/$b.failed"; return 0
+    fi
+    [ "$n" -lt "$tries" ] || break
+    sleep "$delay"; delay=$((delay * 2)); n=$((n + 1))
+  done
+  log "box=$b repos=$repos FAILED after $n attempt(s): $(grep -v '^expires_at=' "$ERRF" | head -n1 | cut -c1-120)"
+  rm -f "$ERRF"; : >"$STATE/$b.failed"
+  warn_if_expiring "$b"
+  return 1
+}
+
+running_boxes() { "$ORB" list 2>/dev/null | awk '$2 == "running" && $1 != "box-base" { print $1 }'; }
+
+# $1 attempts, $2 all (refresh every box) | missing (only boxes without a token file). Boxes with no registry file are skipped.
+each_box() {
+  local b
+  while read -r b; do
+    [ -e "$REG/$b.json" ] || continue
+    if [ "$2" = missing ]; then
+      # a box that just failed waits 5 minutes, so a broken registry does not hit GitHub every minute
+      [ -z "$(find "$STATE/$b.failed" -mmin -5 2>/dev/null)" ] || continue
+      "$ORB" -m "$b" test -s /run/agent/gh-token </dev/null 2>/dev/null && continue
+      log "box=$b token file missing, restoring"
+    fi
+    refresh_box "$b" "$1" || true
+  done < <(running_boxes)
+}
+
+pass() {
+  if [ -e "$STATE/panic" ]; then [ "$2" != all ] || log "panic flag set, not refreshing"; return 0; fi
+  lock || { log "another tick is running, skipped"; return 0; }
+  each_box "$1" "$2"
+  unlock
+}
+
+# A jump in wall-clock time across one sleep means the Mac slept: tick at once, then resume the 30-minute cadence.
+daemon() {
+  local step=${STEP_SECONDS:-60} every=${TICK_SECONDS:-1800} last=0 now before after
+  log "refresher started (full tick every ${every}s, restore check every ${step}s)"
+  while :; do
+    now=$(date +%s)
+    if [ $((now - last)) -ge "$every" ]; then pass 3 all; last=$(date +%s); else pass 1 missing; fi
+    before=$(date +%s); sleep "$step"; after=$(date +%s)
+    if [ $((after - before)) -gt $((step * 3)) ]; then
+      log "woke from sleep ($((after - before))s gap), ticking now"; last=0
+    fi
+  done
+}
+
+plist() {
+  cat <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$LABEL</string>
+  <key>ProgramArguments</key>
+  <array><string>$SH</string><string>$HERE/box-refresh</string><string>--daemon</string></array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>$HOME</string>
+    <key>PATH</key><string>$PATH</string>
+    <key>ORB</key><string>$ORB</string>
+    <key>JQ</key><string>$JQ</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>StandardOutPath</key><string>$HOME/Library/Logs/agent-boxes/launchd.log</string>
+  <key>StandardErrorPath</key><string>$HOME/Library/Logs/agent-boxes/launchd.log</string>
+</dict>
+</plist>
+EOF
+}
+
+if [ "${1:-}" = --print-plist ]; then plist; exit; fi
+(umask 077; mkdir -p "$STATE" "$(dirname "$LOG")")
+case "${1:-}" in
+  --once) VERBOSE=1; pass 3 all ;;
+  --daemon) daemon ;;
+  *) echo "Usage: box-refresh --once | --daemon | --print-plist" >&2; exit 1 ;;
+esac

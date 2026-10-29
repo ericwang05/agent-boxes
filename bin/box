@@ -8,6 +8,7 @@
 set -euo pipefail
 
 sandbox="${BOX_SANDBOX:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../box/sandbox}"
+mint="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/box-mint"
 config="$HOME/.config/agent-boxes/config"
 dry=false
 
@@ -19,6 +20,7 @@ Usage: box [--dry-run] new NAME [--repos owner/repo[,owner/repo]]
        box [--dry-run] destroy NAME
        box [--dry-run] rm NAME
        box [--dry-run] base
+       box [--dry-run] panic
        box ls
 
 new      create the repo and a box (--repos: GitHub App token for those repos instead of the classic collaborator token)
@@ -27,6 +29,7 @@ retire   delete the box and remove the agent's access to the repo
 destroy  retire, then delete the repo (asks first)
 rm       delete the box only; the repo and access stay
 base     (re)build box-base and apply box/claude to it
+panic    stop the token refresher and every box, then print how to suspend the GitHub App
 
 --dry-run prints every command instead of running it.
 EOF
@@ -48,6 +51,22 @@ cmd="${1:-}"; shift || true
 claude_dir="$(dirname "$sandbox")/claude"
 case "$cmd" in
   ls) run "$sandbox" ls; exit ;;
+  panic)
+    # The flag keeps any refresher from minting again; bootout unloads the launchd job if it is installed.
+    run mkdir -p "${BOX_CONFIG_DIR:-$HOME/.config/agent-boxes}/state"
+    run touch "${BOX_CONFIG_DIR:-$HOME/.config/agent-boxes}/state/panic"
+    run /bin/launchctl bootout "gui/$(id -u)/dev.agent-boxes.refresh" || true
+    while read -r m; do run orb stop "$m" </dev/null || true; done < <(orb list | awk '$2 == "running" { print $1 }')
+    cat <<'EOF'
+
+Boxes stopped and the refresher is off. Tokens already issued stay valid for up to 1 hour
+(revoking one can lag on git, so do not rely on it). To cut GitHub access now:
+  1. github.com/settings/installations > agent-token-minter > Configure
+  2. Danger zone > Suspend (reversible) or Uninstall
+  3. If the private key may have leaked: github.com/settings/apps/agent-token-minter > Private keys > delete it
+To resume: rm ~/.config/agent-boxes/state/panic, unsuspend the App, start the boxes, reload the launchd job.
+EOF
+    exit ;;
   base)
     [ -s "$claude_dir/settings.json" ] || die "missing $claude_dir/settings.json"
     ! grep -rqiE 'ghp_|github_pat_|sk-ant|oauth' "$claude_dir" || die "$claude_dir must not hold tokens"
@@ -91,7 +110,8 @@ done
 # --repos selects the GitHub App path; reset follows the registry file new left behind.
 reg_dir="${BOX_CONFIG_DIR:-$HOME/.config/agent-boxes}/boxes"
 app=false
-{ [ -n "$repos" ] || { [ "$cmd" = reset ] && [ -e "$reg_dir/$name.json" ]; }; } && app=true
+state_dir="${BOX_CONFIG_DIR:-$HOME/.config/agent-boxes}/state"
+{ [ -n "$repos" ] || { [ "$cmd" != new ] && [ -e "$reg_dir/$name.json" ]; }; } && app=true
 if [ -n "$repos" ]; then
   owners=""
   IFS=, read -ra repo_list <<<"$repos"
@@ -110,6 +130,9 @@ OWNER="" AGENT=""
 [ -n "$OWNER" ] && [ -n "$AGENT" ] || die "$config must set OWNER and AGENT"
 owner="$OWNER" agent="$AGENT"
 repo="repos/$owner/$name"
+if [ -n "$repos" ]; then
+  for r in "${repo_list[@]}"; do [ "${r%%/*}" = "$owner" ] || die "--repos entries must belong to $owner: $r"; done
+fi
 [[ -z "$ref" || "$ref" =~ ^[A-Za-z0-9_][A-Za-z0-9._/-]*$ ]] || die "invalid --ref: $ref"
 if ! $dry; then
   for tool in gh git herdr jq; do command -v "$tool" >/dev/null || die "$tool not found"; done
@@ -138,13 +161,23 @@ delete_repo() {
   run gh repo delete "$owner/$name" --yes
 }
 
+# Take away what the box could do on GitHub: stop minting for it (App path) or drop the collaborator (classic).
+retire_access() {
+  if $app; then
+    run rm -f "$reg_dir/$name.json" "$state_dir/$name.expiry" "$state_dir/$name.notified" "$state_dir/$name.failed"
+    echo "box: $name is no longer refreshed. Its last token expires within 1 hour; to cut it off sooner, run: box panic" >&2
+  else
+    run gh api -X DELETE "$repo/collaborators/$agent" >/dev/null
+  fi
+}
+
 repo_id=0 # only new knows the id; reset passes accept=0 and never reads it
 # Create the box, connect herdr, clone the repo and open its workspace. $1 = accept the collaborator invite (new only).
 provision() {
   local accept="$1"
   # Machine add inside this step starts the box herdr server.
   echo "==> Creating box $name"
-  run "$sandbox" new "$name"
+  if $app; then run env BOX_AUTH=app "$sandbox" new "$name"; else run "$sandbox" new "$name"; fi
   # herdr reaches the box over ssh; fail here with a hint rather than inside machine add.
   local ssh_ok=false
   for _ in $(seq 10); do
@@ -162,10 +195,17 @@ Host orb
   # Before any pane exists: machine add starts the box's herdr server and may restart it, killing panes.
   # No tty on stdin keeps it non-interactive; a fresh box has herdr installed and no server, so nothing to confirm.
   run herdr machine add "ssh://$name@orb" --label "$name" --remote-session default </dev/null
+  # App path: the first token goes in before the clone; the refresher keeps it fresh after that.
+  local auth_check='[ -n "${GH_TOKEN:-}" ] || { echo "box: GH_TOKEN missing in the box" >&2; exit 1; }'
+  if $app; then
+    auth_check='[ -s /run/agent/gh-token ] || { echo "box: no App token in the box" >&2; exit 1; }'
+    echo "==> Seeding the first GitHub App token"
+    if $dry; then echo "+ box-mint $name | $sandbox seed $name" >&2; else "$mint" "$name" </dev/null | "$sandbox" seed "$name"; fi
+  fi
   # The invite can lag behind the PUT, so retry the accept.
   run_in "$sandbox" exec "$name" bash -s <<EOF
 set -euo pipefail
-[ -n "\${GH_TOKEN:-}" ] || { echo "box: GH_TOKEN missing in the box" >&2; exit 1; }
+$auth_check
 if [ "$accept" = 1 ]; then
   # Invitations left by deleted repos of the same name carry other repo ids: decline them, accept only ours.
   for _ in \$(seq 30); do
@@ -212,7 +252,7 @@ case "$cmd" in
   retire)
     machine_remove
     run "$sandbox" rm "$name"
-    run gh api -X DELETE "$repo/collaborators/$agent" >/dev/null
+    retire_access
     exit ;;
   destroy)
     if ! $dry; then
@@ -221,13 +261,12 @@ case "$cmd" in
     fi
     machine_remove
     run "$sandbox" rm "$name" || echo "box: no box $name, continuing" >&2
-    run gh api -X DELETE "$repo/collaborators/$agent" >/dev/null || echo "box: agent was not a collaborator, continuing" >&2
+    retire_access || true
     delete_repo
     exit ;;
   reset)
     machine_remove
     run "$sandbox" rm "$name"
-    # HOOK (app path): first-token provisioning for reset goes here when $app is true.
     provision 0
     echo "box $name reset${ref:+ at $ref}: github.com/$owner/$name"
     exit ;;
@@ -322,11 +361,12 @@ run_in gh api -X POST "$repo/rulesets" --input - >/dev/null <<'EOF'
 EOF
 if $app; then
   # Registry file: the repos this box may get tokens for (read by bin/box-mint). Dir 700, file 600.
-  if $dry; then echo "+ write $reg_dir/$name.json {\"repos\":[$repos]} (mode 600)" >&2
+  # The box's own repo is always included, or it could not clone or push.
+  all="$owner/$name,$repos"
+  if $dry; then echo "+ write $reg_dir/$name.json {\"repos\":[$all]} (mode 600)" >&2
   else
-    (umask 077; mkdir -p "$reg_dir"; jq -nc --arg r "$repos" '{repos: ($r | split(","))}' >"$reg_dir/$name.json")
+    (umask 077; mkdir -p "$reg_dir"; jq -nc --arg r "$all" '{repos: ($r | split(",") | map(select(. != "")) | unique)}' >"$reg_dir/$name.json")
   fi
-  # HOOK (app path): first-token provisioning for new goes here (bin/box-mint "$name" into the box).
 else
   run gh api -X PUT "$repo/collaborators/$agent" -f permission=push >/dev/null
 fi

@@ -19,6 +19,7 @@ usage() {
 Usage: sandbox <command>
   base                Build (or rebuild) the base machine from setup.sh
   new <name>          Clone base into a hardened machine, no host mount
+  seed <name>         Install a GitHub App token read from stdin (App path)
   exec <name> '<cmd>' Run a login-shell command in a machine
   rm <name>           Delete a machine
   ls                  List machines
@@ -138,6 +139,12 @@ inject_token() {
       fi'
 }
 
+# App path keeps only the Claude token; GitHub access comes from install-token.
+inject_claude_token() {
+  { tr -d '[:space:]' < "$CLAUDE_TOKEN_FILE"; echo; } |
+    orb -m "$1" bash -c 'set -e; read -r t; umask 077; printf "export CLAUDE_CODE_OAUTH_TOKEN=%s\n" "$t" > ~/.claude-token-env'
+}
+
 # GitHub App path (replaces the classic token): install the root-owned tools, then seed a token.
 install_app_token_tools() {
   orb -m "$1" -u root env SETUP_USER="$SANDBOX_USER" bash -s < "$HERE/app-token.sh"
@@ -169,9 +176,13 @@ STEPS
     name="${1:-}"; need_name "$name"
     exists "$BASE" || { echo "error: no base - run: $0 base" >&2; exit 1; }
     exists "$name" && { echo "error: '$name' already exists" >&2; exit 1; }
-    [ -r "$TOKEN_FILE" ] || { echo "error: no agent token at $TOKEN_FILE" >&2; exit 1; }
+    # BOX_AUTH=app: GitHub App tokens (seeded later by `seed`) replace the classic token and the git identity.
+    app=false; [ "${BOX_AUTH:-}" != app ] || app=true
     [ -r "$CLAUDE_TOKEN_FILE" ] || { echo "error: no Claude token at $CLAUDE_TOKEN_FILE (from: claude setup-token)" >&2; exit 1; }
-    [ -n "${GIT_NAME:-}" ] && [ -n "${GIT_EMAIL:-}" ] || { echo "error: set GIT_NAME and GIT_EMAIL in $CONFIG_FILE" >&2; exit 1; }
+    if ! $app; then
+      [ -r "$TOKEN_FILE" ] || { echo "error: no agent token at $TOKEN_FILE" >&2; exit 1; }
+      [ -n "${GIT_NAME:-}" ] && [ -n "${GIT_EMAIL:-}" ] || { echo "error: set GIT_NAME and GIT_EMAIL in $CONFIG_FILE" >&2; exit 1; }
+    fi
     trap 'orb delete -f "$name" >/dev/null 2>&1 || true; echo "error: creation failed, cleaned up" >&2' ERR
     orb clone "$BASE" "$name"
     orb config set "machine.$name.cpu" "$BOX_CPUS"
@@ -184,7 +195,7 @@ STEPS
     install_firewall "$name"
     harden "$name"
     check_isolation "$name"
-    inject_token "$name"
+    if $app; then inject_claude_token "$name"; install_app_token_tools "$name"; else inject_token "$name"; fi
     trap - ERR
     echo "ready: $0 exec $name '<cmd>'"
     ;;
@@ -194,6 +205,10 @@ STEPS
     shift; [ $# -gt 0 ] || { usage >&2; exit 1; }
     # "$*" so `exec n 'cmd'` and `exec n bash -s` (stdin passthrough) both work
     exec orb -m "$name" bash -lc "$*"
+    ;;
+  seed)
+    name="${1:-}"; need_name "$name"
+    seed_token "$name"
     ;;
   rm)
     name="${1:-}"; need_name "$name"
