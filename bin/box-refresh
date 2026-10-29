@@ -12,7 +12,7 @@ ORB="${ORB:-$(command -v orb || echo /opt/homebrew/bin/orb)}"
 JQ="${JQ:-$(command -v jq || echo /usr/bin/jq)}"
 SH="${BASH:-/bin/bash}" # run the helper scripts with the same bash, not whatever `env bash` finds under launchd
 CFG="${BOX_CONFIG_DIR:-$HOME/.config/agent-boxes}"
-REG="$CFG/boxes" STATE="$CFG/state"
+REG="$CFG/box-repos" STATE="$CFG/state"
 LOG="${BOX_LOG:-$HOME/Library/Logs/agent-boxes/refresh.log}"
 LABEL=dev.agent-boxes.refresh
 # launchd starts with a bare environment, so name every tool's directory here.

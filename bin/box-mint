@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# box-mint NAME: print one GitHub App installation token for the repos in boxes/NAME.json ({"repos":["owner/name"]}).
+# box-mint NAME: print one GitHub App installation token for the repos in box-repos/NAME.json ({"repos":["owner/name"]}).
 # Stdout is the token and nothing else; diagnostics and expires_at=<iso8601> go to stderr. BOX_CONFIG_DIR overrides ~/.config/agent-boxes.
 # The JWT and token only ever travel through shell variables and curl's stdin (-H @-), never argv or files.
 set -euo pipefail
@@ -9,7 +9,7 @@ die() { echo "box-mint: $*" >&2; exit 1; }
 cfg="${BOX_CONFIG_DIR:-$HOME/.config/agent-boxes}"
 name="${1:-}"
 [[ "$name" =~ ^[a-z][a-z0-9-]*$ ]] || die "usage: box-mint NAME (lowercase letters, digits, dashes)"
-reg="$cfg/boxes/$name.json"
+reg="$cfg/box-repos/$name.json"
 [ -r "$reg" ] || die "missing registry file $reg"
 [ -r "$cfg/app.conf" ] && [ -r "$cfg/app.pem" ] || die "missing $cfg/app.conf or app.pem"
 for t in curl jq openssl; do command -v "$t" >/dev/null || die "$t not found"; done

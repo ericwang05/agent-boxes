@@ -16,7 +16,7 @@ die() { echo "box-verify: $*" >&2; exit 1; }
 name="$1"
 [[ "$name" =~ ^[a-z][a-z0-9-]*$ ]] || die "BOX must be lowercase letters, digits, dashes: $name"
 allow="${VERIFY_ALLOW_WRITE:-0}"
-reg="${BOX_CONFIG_DIR:-$HOME/.config/agent-boxes}/boxes/$name.json"
+reg="${BOX_CONFIG_DIR:-$HOME/.config/agent-boxes}/box-repos/$name.json"
 repo=$(jq -r '.repo // empty' "$reg" 2>/dev/null) || true
 [ -n "$repo" ] || die "no repo recorded in $reg"
 other="${VERIFY_OTHER:-ericwang05/test2}"

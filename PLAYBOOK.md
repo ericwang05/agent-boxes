@@ -121,7 +121,7 @@ This picks up updates to Nix, herdr, Claude Code and your `box/claude/`. Existin
 | A box looks empty, or `sudo` works | You typed a box name that doesn't exist, and OrbStack connected you to its default machine instead. Check `orb list` |
 | `repo … already exists` | Existing project: `box reset <name>`. Starting over: `box destroy <name>` |
 | `agent cannot push … 403` | Legacy `--classic` box: check the agent token has `repo:invite`, then `box destroy` and `box new` |
-| `mint failed: HTTP 422 … does not exist or is not accessible` | The registry file for the box names a repo that doesn't exist or the App can't reach. Check `~/.config/agent-boxes/boxes/<name>.json` |
+| `mint failed: HTTP 422 … does not exist or is not accessible` | The registry file for the box names a repo that doesn't exist or the App can't reach. Check `~/.config/agent-boxes/box-repos/<name>.json` |
 | `box: no App token in the box` or a box has no `/run/agent/gh-token` | The refresher restores it within a minute if it is running. If not, load the launchd job (README, setup step 7) or run `bin/box-refresh --once` |
 | `panic flag set, not refreshing` in the refresher log | You ran `box panic`. Delete `~/.config/agent-boxes/state/panic` to resume |
 | `mint failed: HTTP 401` | The App's key or ids in `~/.config/agent-boxes` are wrong, the key was deleted, or the App is suspended |

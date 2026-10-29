@@ -115,7 +115,7 @@ done
 
 # new uses GitHub App tokens unless --classic; every other command follows the registry file new left behind
 # (a box with no registry file is an older classic box).
-reg_dir="${BOX_CONFIG_DIR:-$HOME/.config/agent-boxes}/boxes"
+reg_dir="${BOX_CONFIG_DIR:-$HOME/.config/agent-boxes}/box-repos"
 app=false
 state_dir="${BOX_CONFIG_DIR:-$HOME/.config/agent-boxes}/state"
 if [ "$cmd" = new ]; then

@@ -51,7 +51,7 @@ These are checked automatically every time a box is created. If any check fails,
 
 The base image itself holds none. Commits are authored by the App's bot identity.
 
-Because the App is installed on all of your repositories, **the per-box registry in `~/.config/agent-boxes/boxes/` is what limits a box to its own repo.** Only the Mac writes it. Boxes cannot read or change it.
+Because the App is installed on all of your repositories, **the per-box registry in `~/.config/agent-boxes/box-repos/` is what limits a box to its own repo.** Only the Mac writes it. Boxes cannot read or change it.
 
 ## One-time setup
 
