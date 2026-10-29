@@ -62,9 +62,9 @@ case "$cmd" in
 
 Boxes stopped and the refresher is off. Tokens already issued stay valid for up to 1 hour
 (revoking one can lag on git, so do not rely on it). To cut GitHub access now:
-  1. github.com/settings/installations > agent-token-minter > Configure
+  1. github.com/settings/installations > eric-w-agent > Configure
   2. Danger zone > Suspend (reversible) or Uninstall
-  3. If the private key may have leaked: github.com/settings/apps/agent-token-minter > Private keys > delete it
+  3. If the private key may have leaked: github.com/settings/apps/eric-w-agent > Private keys > delete it
 To resume: rm ~/.config/agent-boxes/state/panic, unsuspend the App, start the boxes, reload the launchd job.
 EOF
     exit ;;
@@ -251,7 +251,7 @@ if [ "$accept" = 1 ]; then
   \$pushed || { echo "box: agent cannot push to $owner/$name; last git error:" >&2; echo "\$err" >&2; exit 1; }
 fi
 [ -z "$ref" ] || git checkout "$ref"
-direnv allow ~/$name
+[ ! -e ~/$name/.envrc ] || direnv allow ~/$name # an attached repo may have no .envrc
 # Pre-accept folder trust so the agent never blocks on a dialog.
 mkdir -p ~/.claude
 [ -s ~/.claude.json ] || echo '{}' > ~/.claude.json

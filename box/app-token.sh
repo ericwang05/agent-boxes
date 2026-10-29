@@ -5,7 +5,7 @@
 set -euo pipefail
 : "${SETUP_USER:?}"
 home="/home/$SETUP_USER"
-APP_SLUG=agent-token-minter
+APP_SLUG=eric-w-agent
 # TODO(parent): fill from `gh api /users/agent-token-minter%5Bbot%5D --jq .id`; must be numeric
 BOT_USER_ID=349697021
 [[ "$BOT_USER_ID" =~ ^[0-9]+$ ]] || { echo "error: set BOT_USER_ID in app-token.sh" >&2; exit 1; }
