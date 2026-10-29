@@ -1,0 +1,234 @@
+#!/usr/bin/env bash
+# box-verify BOX: Group 5 security check of a box's GitHub access, always against ericwang05/test.
+# Installs a freshly minted App token, then checks: the agent cannot tamper with the token file or
+# install-token; install-token refuses bad input; the App token cannot push to or delete main or edit
+# the ruleset; and the token appears nowhere in the box. Prints PASS/FAIL/SKIP lines and a VERIFY summary.
+# Writes to GitHub only for the control push to agent/test, and only with VERIFY_ALLOW_WRITE=1.
+# The token travels only on stdin or in shell variables, never argv, and is never printed or stored.
+set -euo pipefail
+
+here=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
+die() { echo "box-verify: $*" >&2; exit 1; }
+[ "$#" = 1 ] || die "usage: box-verify BOX"
+name="$1"
+[[ "$name" =~ ^[a-z][a-z0-9-]*$ ]] || die "BOX must be lowercase letters, digits, dashes: $name"
+allow="${VERIFY_ALLOW_WRITE:-0}"
+res="$(mktemp -d "${TMPDIR:-/tmp}/box-verify.XXXXXX")"
+trap 'unset tok; rm -rf "$res"' EXIT
+
+# rec FILE STATUS TEXT appends one result line. Results never carry a token.
+rec() { printf '%s: %s\n' "$2" "$3" >>"$1"; }
+# keep OUTPUT FILE keeps only the PASS/FAIL/SKIP lines a remote script printed.
+keep() { printf '%s\n' "$1" | grep -E '^(PASS|FAIL|SKIP): ' >>"$2" || true; }
+
+# Remote scripts. They read the token from stdin where needed and print only status lines.
+read -r -d '' G1 <<'EOF' || true
+set -u
+f=/run/agent/gh-token; i=/usr/local/sbin/install-token
+sig() { echo "$(sha256sum "$1" 2>/dev/null | cut -d' ' -f1) $(stat -c '%a %U:%G' "$1" 2>/dev/null)"; }
+acc=0
+try() { if "$@" >/dev/null 2>&1; then acc=1; fi; }
+fb=$(sig "$f"); ib=$(sig "$i")
+try sh -c "echo x >> $f"
+try mv -f "$f" "$f.moved"
+try rm "$f"
+try sh -c ": > $f"
+try sh -c "echo x > $f"
+accf=$acc; acc=0
+try sh -c "echo x >> $i"
+try chmod 777 "$i"
+try sh -c "echo x > $i"
+try cp -f /dev/null "$i"
+try rm "$i"
+try sh -c "echo x > $i.new && mv -f $i.new $i"
+acci=$acc
+if [ "$accf" = 0 ] && [ -n "${fb%% *}" ] && [ "$(sig "$f")" = "$fb" ]; then
+  echo "PASS: agent cannot modify gh-token, content unchanged"
+else echo "FAIL: agent cannot modify gh-token, content unchanged"; fi
+if [ "$acci" = 0 ] && [ -n "${ib%% *}" ] && [ "$(sig "$i")" = "$ib" ]; then
+  echo "PASS: agent cannot modify install-token"
+else echo "FAIL: agent cannot modify install-token"; fi
+exit 0
+EOF
+
+read -r -d '' G3 <<'EOF' || true
+set -u
+read -r VERIFY_TOKEN || { echo "FAIL: token missing on stdin"; exit 0; }
+export VERIFY_TOKEN
+repo=ericwang05/test; api="https://api.github.com/repos/$repo"
+tmp=$(mktemp -d) || { echo "FAIL: no temp dir"; exit 0; }
+trap 'rm -rf "$tmp"' EXIT
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
+helper='!f() { echo username=x-access-token; echo "password=$VERIFY_TOKEN"; }; f'
+git_() { git -c "credential.helper=$helper" "$@"; }
+# call METHOD URL OUTFILE [curl args]: prints the HTTP status. The token reaches curl only on stdin.
+call() {
+  local m=$1 u=$2 o=$3; shift 3
+  printf 'Authorization: token %s\n' "$VERIFY_TOKEN" |
+    curl -sS -m 30 -o "$o" -w '%{http_code}' -X "$m" -H @- -H 'Accept: application/vnd.github+json' "$@" "$u" 2>/dev/null
+}
+emit() { echo "$1: $2"; }
+wrote=0
+# api_check NAME METHOD URL OUTFILE [curl args]: PASS only when GitHub answers the write with 4xx.
+api_check() {
+  local name=$1 code
+  if [ "$wrote" = 1 ]; then emit SKIP "$name (not attempted: an earlier write was accepted)"; return 0; fi
+  code=$(call "${@:2}")
+  case $code in
+    4??) emit PASS "$name rejected ($code)" ;;
+    2??) wrote=1; emit FAIL "$name accepted ($code)" ;;
+    *) wrote=1; emit FAIL "$name: no clean rejection ($code)" ;;
+  esac
+}
+# git_check NAME GIT-ARGS...: PASS only when git refuses the push.
+git_check() {
+  local name=$1; shift
+  if [ "$wrote" = 1 ]; then emit SKIP "$name (not attempted: an earlier write was accepted)"; return 0; fi
+  if git_ "$@" >/dev/null 2>&1; then wrote=1; emit FAIL "$name accepted"; else emit PASS "$name rejected"; fi
+}
+
+code=$(call GET "https://api.github.com/installation/repositories" "$tmp/inst.json")
+if [ "$code" = 200 ] && jq -e --arg r "$repo" '[.repositories[].full_name] | index($r) != null' "$tmp/inst.json" >/dev/null 2>&1; then
+  emit PASS "App token authenticates for $repo"
+else
+  emit FAIL "App token authenticates for $repo ($code)"; exit 0
+fi
+git_ clone -q "https://github.com/$repo.git" "$tmp/r" >/dev/null 2>&1 || { emit FAIL "clone $repo"; exit 0; }
+cd "$tmp/r"
+git -c user.name=verify -c user.email=verify@example.invalid commit -q --allow-empty -m "verify probe" \
+  || { emit FAIL "local probe commit"; exit 0; }
+
+git_check "direct push to main" push -q origin HEAD:refs/heads/main
+git_check "delete main by git push" push -q origin :refs/heads/main
+api_check "delete main by API" DELETE "$api/git/refs/heads/main" "$tmp/o.json"
+
+code=$(call GET "$api/rulesets" "$tmp/rulesets.json")
+rid=$(jq -r '.[0].id // empty' "$tmp/rulesets.json" 2>/dev/null || true)
+if [ "$code" = 200 ] && [ -n "$rid" ] && [ "$(call GET "$api/rulesets/$rid" "$tmp/rs.json")" = 200 ] \
+   && jq '{name, target, enforcement, bypass_actors, conditions, rules}' "$tmp/rs.json" >"$tmp/put.json" 2>/dev/null; then
+  # The body is the ruleset as it is now, so an accepted edit changes nothing.
+  api_check "edit ruleset $rid" PUT "$api/rulesets/$rid" "$tmp/o.json" \
+    -H 'Content-Type: application/json' --data-binary "@$tmp/put.json"
+else
+  emit FAIL "list and read the ruleset (edit not tested)"
+fi
+
+if [ "$wrote" = 1 ]; then emit SKIP "control push (not attempted: an earlier write was accepted)"
+elif [ "${VERIFY_ALLOW_WRITE:-0}" != 1 ]; then emit SKIP "control push (set VERIFY_ALLOW_WRITE=1 to run it)"
+elif git_ push -q origin HEAD:refs/heads/agent/test >/dev/null 2>&1; then emit PASS "control push to agent/test accepted"
+else emit FAIL "control push to agent/test accepted"; fi
+exit 0
+EOF
+
+read -r -d '' G4 <<'EOF' || true
+set -u
+umask 077
+read -r tok || { echo "FAIL: token missing on stdin"; exit 0; }
+d=$(mktemp -d /dev/shm/verify.XXXXXX) || { echo "FAIL: no tmpfs dir for the search"; exit 0; }
+trap 'shred -u -f "$d/pat" 2>/dev/null; rm -rf "$d"' EXIT
+printf '%s\n%s\n' "$tok" "${tok:0:20}" >"$d/pat"
+unset tok
+hit=0; err=0
+# chk FILE [proc]: grep 0 = found, 2 = unreadable (ignored for /proc entries that exited).
+chk() {
+  local rc=0
+  grep -qF -f "$d/pat" -- "$1" 2>/dev/null || rc=$?
+  case $rc in 0) hit=1 ;; 2) [ "${2:-}" = proc ] || err=1 ;; esac
+}
+env >"$d/env" 2>/dev/null; chk "$d/env"
+agent=$(getent passwd 1000 | cut -d: -f1 || true)
+[ -z "$agent" ] || { runuser -u "$agent" -- env >"$d/aenv" 2>/dev/null; chk "$d/aenv"; }
+ps -eo args >"$d/ps" 2>/dev/null; chk "$d/ps"
+for p in /proc/[0-9]*/environ; do [ -e "$p" ] && chk "$p" proc; done
+while IFS= read -r -d '' f; do chk "$f"; done < <(find /var/log /home /root /tmp -xdev -type f -print0 2>/dev/null)
+if [ "$hit" = 1 ]; then echo "FAIL: token found in box env, process list, history or logs"
+elif [ "$err" = 1 ]; then echo "FAIL: leak search could not read every file"
+else echo "PASS: token not found in box env, process list, history or logs"; fi
+exit 0
+EOF
+
+# Groups 1 and 2 run in parallel with group 3; group 4 waits for group 3, since it must not
+# catch the token still held by the GitHub checks' processes.
+group1() {
+  local f="$res/10-group1" out
+  out=$(orb -m "$name" bash -c "$G1" 2>/dev/null) || rec "$f" FAIL "agent-side checks did not run"
+  keep "$out" "$f"
+}
+
+group2() {
+  local f="$res/20-group2" a36 c label s before after
+  a36=$(printf 'A%.0s' {1..36})
+  before=$(orb -m "$name" -u root sha256sum /run/agent/gh-token 2>/dev/null | cut -d' ' -f1) || true
+  for c in "empty|" "short|ghs_short" "wrong prefix|ghp_$a36" \
+           "embedded whitespace|ghs_${a36:0:18} ${a36:18}" \
+           "two lines|ghs_$a36"$'\n'"ghs_$a36" \
+           "5000 chars|ghs_$(printf 'A%.0s' {1..4996})"; do
+    label=${c%%|*}; s=${c#*|}
+    if printf '%s' "$s" | orb -m "$name" -u root /usr/local/sbin/install-token >/dev/null 2>&1; then
+      rec "$f" FAIL "install-token rejects $label (exit 0)"
+    else
+      rec "$f" PASS "install-token rejects $label"
+    fi
+  done
+  after=$(orb -m "$name" -u root sha256sum /run/agent/gh-token 2>/dev/null | cut -d' ' -f1) || true
+  if [ -n "$before" ] && [ "$after" = "$before" ]; then
+    rec "$f" PASS "token file unchanged by bad input"
+  else
+    rec "$f" FAIL "token file unchanged by bad input"
+  fi
+}
+
+group3() {
+  local f="$res/30-group3" out
+  out=$(printf '%s\n' "$tok" | orb -m "$name" env VERIFY_ALLOW_WRITE="$allow" bash -c "$G3" 2>/dev/null) \
+    || rec "$f" FAIL "GitHub checks did not run"
+  keep "$out" "$f"
+}
+
+group4() {
+  local f="$res/40-group4" out
+  out=$(printf '%s\n' "$tok" | orb -m "$name" -u root bash -c "$G4" 2>/dev/null) \
+    || rec "$f" FAIL "leak search did not run"
+  keep "$out" "$f"
+}
+
+# setup mints the token (kept in $tok) and installs it, so the token file exists for groups 1 and 2.
+setup() {
+  local f="$res/00-setup"
+  if tok=$("$here/box-mint" "$name" 2>/dev/null) && [[ "$tok" =~ ^ghs_[A-Za-z0-9_]+$ ]]; then
+    rec "$f" PASS "mint App token"
+  else
+    tok=""
+    rec "$f" FAIL "mint App token (box-mint did not print a ghs_ token)"
+    return 1
+  fi
+  if printf '%s\n' "$tok" | orb -m "$name" -u root /usr/local/sbin/install-token >/dev/null 2>&1; then
+    rec "$f" PASS "install-token accepts a valid token"
+  else
+    rec "$f" FAIL "install-token accepts a valid token"
+    return 1
+  fi
+}
+
+finish() {
+  local all p f s
+  all="$(cat "$res"/*)"
+  printf '%s\n' "$all"
+  p=$(printf '%s\n' "$all" | grep -c '^PASS: ' || true)
+  f=$(printf '%s\n' "$all" | grep -c '^FAIL: ' || true)
+  s=$(printf '%s\n' "$all" | grep -c '^SKIP: ' || true)
+  echo "VERIFY: $p passed, $f failed, $s skipped"
+  [ "$f" = 0 ]
+}
+
+setup_ok=1
+setup || setup_ok=0
+if [ "$setup_ok" = 1 ]; then
+  group1 & p1=$!
+  group2 & p2=$!
+  ( group3; group4 ) & p3=$!
+  wait "$p1" || rec "$res/10-group1" FAIL "agent-side group crashed"
+  wait "$p2" || rec "$res/20-group2" FAIL "install-token group crashed"
+  wait "$p3" || rec "$res/30-group3" FAIL "GitHub or leak-search group crashed"
+fi
+finish
