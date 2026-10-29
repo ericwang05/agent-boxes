@@ -14,7 +14,7 @@ dry=false
 
 usage() {
   cat <<'EOF'
-Usage: box [--dry-run] new NAME [--repos owner/repo[,owner/repo]]
+Usage: box [--dry-run] new NAME [--repo owner/name | --repos owner/name[,owner/name]]
        box [--dry-run] reset NAME [--ref COMMIT]
        box [--dry-run] retire NAME
        box [--dry-run] destroy NAME
@@ -23,7 +23,8 @@ Usage: box [--dry-run] new NAME [--repos owner/repo[,owner/repo]]
        box [--dry-run] panic
        box ls
 
-new      create the repo and a box (--repos: GitHub App token for those repos instead of the classic collaborator token)
+new      create the repo and a box (--repos: GitHub App token for those repos instead of the classic collaborator token;
+         --repo: attach the box to an existing repo, App token only, nothing in the repo is changed)
 reset    delete the box and make a fresh one from the existing repo (at --ref if given)
 retire   delete the box and remove the agent's access to the repo
 destroy  retire, then delete the repo (asks first)
@@ -98,9 +99,10 @@ esac
 
 name="${1:?usage: box $cmd NAME}"; shift
 [[ "$name" =~ ^[a-z][a-z0-9-]*$ ]] || die "NAME must be lowercase letters, digits, dashes (it is also the ssh user): $name"
-ref="" repos=""
+ref="" repos="" attach=""
 while [ $# -gt 0 ]; do
   case "$cmd:$1" in
+    new:--repo) attach="${2:?--repo needs owner/name}"; shift 2 ;;
     new:--repos) repos="${2:?--repos needs a value}"; shift 2 ;;
     reset:--ref) ref="${2:?--ref needs a value}"; shift 2 ;;
     *) usage >&2; die "unknown argument: $1" ;;
@@ -111,7 +113,7 @@ done
 reg_dir="${BOX_CONFIG_DIR:-$HOME/.config/agent-boxes}/boxes"
 app=false
 state_dir="${BOX_CONFIG_DIR:-$HOME/.config/agent-boxes}/state"
-{ [ -n "$repos" ] || { [ "$cmd" != new ] && [ -e "$reg_dir/$name.json" ]; }; } && app=true
+{ [ -n "$repos" ] || [ -n "$attach" ] || { [ "$cmd" != new ] && [ -e "$reg_dir/$name.json" ]; }; } && app=true
 if [ -n "$repos" ]; then
   owners=""
   IFS=, read -ra repo_list <<<"$repos"
@@ -129,7 +131,18 @@ OWNER="" AGENT=""
 . "$config"
 [ -n "$OWNER" ] && [ -n "$AGENT" ] || die "$config must set OWNER and AGENT"
 owner="$OWNER" agent="$AGENT"
-repo="repos/$owner/$name"
+# The box's own repo is owner/name unless new --repo attached it to an existing one; the registry remembers which.
+rowner="$owner" rname="$name" attached=false
+if [ -n "$attach" ]; then
+  [[ "$attach" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "invalid --repo (want owner/name): $attach"
+  [ -z "$repos" ] || die "use --repo or --repos, not both"
+  [ "${attach%%/*}" = "$owner" ] || die "--repo must belong to $owner: $attach"
+  rowner="${attach%%/*}" rname="${attach#*/}" attached=true
+elif [ "$cmd" != new ] && [ -e "$reg_dir/$name.json" ]; then
+  r="$(jq -r '.repo // empty' "$reg_dir/$name.json")"; [ -z "$r" ] || { rowner="${r%%/*}" rname="${r#*/}"; }
+  [ "$(jq -r '.attached // false' "$reg_dir/$name.json")" != true ] || attached=true
+fi
+repo="repos/$rowner/$rname"
 if [ -n "$repos" ]; then
   for r in "${repo_list[@]}"; do [ "${r%%/*}" = "$owner" ] || die "--repos entries must belong to $owner: $r"; done
 fi
@@ -139,11 +152,12 @@ if ! $dry; then
   [ -x "$sandbox" ] || die "box layer not found or not executable: $sandbox"
   [ "$(gh api user --jq .login 2>/dev/null)" = "$owner" ] || die "gh is not logged in as $owner; run: gh auth login"
   if [ "$cmd" = new ]; then
-    ! gh repo view "$owner/$name" >/dev/null 2>&1 || die "repo $owner/$name already exists"
+    [ -n "$attach" ] || ! gh repo view "$owner/$name" >/dev/null 2>&1 || die "repo $owner/$name already exists"
     # A failed new removes the box named $name, so never start over an existing one.
     ! "$sandbox" ls | awk -v n="$name" '$1 == n { f=1 } END { exit !f }' || die "box $name already exists"
-  elif [ "$cmd" != rm ]; then
-    gh repo view "$owner/$name" >/dev/null 2>&1 || die "repo $owner/$name does not exist"
+  fi
+  if [ "$cmd" != rm ] && { [ "$cmd" != new ] || [ -n "$attach" ]; }; then
+    gh repo view "$rowner/$rname" >/dev/null 2>&1 || die "repo $rowner/$rname does not exist"
   fi
 fi
 
@@ -225,7 +239,7 @@ if [ "$accept" = 1 ]; then
     exit 1
   fi
 fi
-gh repo clone $owner/$name ~/$name
+gh repo clone $rowner/$rname ~/$name
 cd ~/$name
 if [ "$accept" = 1 ]; then
   # Collaborator access can lag the accept; a dry-run push exercises the same auth as a real one.
@@ -255,6 +269,7 @@ case "$cmd" in
     retire_access
     exit ;;
   destroy)
+    ! $attached || die "$name is attached to the existing repo $rowner/$rname, which destroy would delete; use: box retire $name"
     if ! $dry; then
       read -r -p "Delete box $name AND repo $owner/$name permanently? [y/N] " ans
       [ "$ans" = y ] || exit 0
@@ -268,9 +283,37 @@ case "$cmd" in
     machine_remove
     run "$sandbox" rm "$name"
     provision 0
-    echo "box $name reset${ref:+ at $ref}: github.com/$owner/$name"
+    echo "box $name reset${ref:+ at $ref}: github.com/$rowner/$rname"
     exit ;;
 esac
+
+# Registry file: the repos this box may get tokens for (read by bin/box-mint), plus which repo is its own. Dir 700, file 600.
+write_registry() {
+  if $dry; then echo "+ write $reg_dir/$name.json repos=[$1] repo=$rowner/$rname attached=$attached (mode 600)" >&2
+  else
+    (umask 077; mkdir -p "$reg_dir"
+     jq -nc --arg r "$1" --arg p "$rowner/$rname" --argjson a "$attached" \
+       '{repos: ($r | split(",") | map(select(. != "")) | unique), repo: $p, attached: $a}' >"$reg_dir/$name.json")
+  fi
+}
+
+# --- new --repo: attach a box to an existing repo. The repo is never created, changed or deleted here. ---
+if [ -n "$attach" ]; then
+  write_registry "$rowner/$rname"
+  attach_cleanup() {
+    local rc=$?
+    trap - EXIT
+    if ! $dry && [ $rc -ne 0 ] && [ "${BOX_KEEP:-}" != 1 ]; then
+      echo "box: new failed, rolling back box $name (the repo $rowner/$rname is untouched)" >&2
+      machine_remove || true; "$sandbox" rm "$name" || true; rm -f "$reg_dir/$name.json"
+    fi
+    exit $rc
+  }
+  trap attach_cleanup EXIT
+  provision 0
+  echo "box $name ready on existing repo: github.com/$rowner/$rname"
+  exit
+fi
 
 # --- new, 1. Mac side: repo contents ---
 dir="$(mktemp -d "${TMPDIR:-/tmp}/box.XXXXXX")"
@@ -360,13 +403,8 @@ run_in gh api -X POST "$repo/rulesets" --input - >/dev/null <<'EOF'
 }
 EOF
 if $app; then
-  # Registry file: the repos this box may get tokens for (read by bin/box-mint). Dir 700, file 600.
-  # The box's own repo is always included, or it could not clone or push.
-  all="$owner/$name,$repos"
-  if $dry; then echo "+ write $reg_dir/$name.json {\"repos\":[$all]} (mode 600)" >&2
-  else
-    (umask 077; mkdir -p "$reg_dir"; jq -nc --arg r "$all" '{repos: ($r | split(",") | map(select(. != "")) | unique)}' >"$reg_dir/$name.json")
-  fi
+  # The box's own repo is always included, or it could not clone or push; --repos adds extras.
+  write_registry "$owner/$name,$repos"
 else
   run gh api -X PUT "$repo/collaborators/$agent" -f permission=push >/dev/null
 fi
