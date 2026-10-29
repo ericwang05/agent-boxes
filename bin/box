@@ -3,7 +3,8 @@
 # new: GitHub repo (empty nix dev shell) plus a sandboxed machine and a herdr workspace; it never starts an agent.
 # reset: rebuild the machine from the existing repo, optionally at a commit. retire: remove the machine and the agent's access.
 # destroy: retire plus delete the repo. A failed new rolls back the repo and box. base: build box-base and apply box/claude.
-# Box layer: box/sandbox new|exec|rm|ls <name>. The box is logged in to gh as the agent account.
+# Box layer: box/sandbox new|seed|exec|rm|ls <name>. Boxes get short-lived GitHub App tokens (bin/box-mint, kept fresh by
+# bin/box-refresh); `new --classic` uses the old agent-account token instead.
 # Config: ~/.config/agent-boxes/config sets OWNER (GitHub user owning repos) and AGENT (agent GitHub username).
 set -euo pipefail
 
@@ -14,7 +15,7 @@ dry=false
 
 usage() {
   cat <<'EOF'
-Usage: box [--dry-run] new NAME [--repo owner/name | --repos owner/name[,owner/name]]
+Usage: box [--dry-run] new NAME [--repo owner/name | --repos owner/name[,owner/name] | --classic]
        box [--dry-run] reset NAME [--ref COMMIT]
        box [--dry-run] retire NAME
        box [--dry-run] destroy NAME
@@ -23,8 +24,10 @@ Usage: box [--dry-run] new NAME [--repo owner/name | --repos owner/name[,owner/n
        box [--dry-run] panic
        box ls
 
-new      create the repo and a box (--repos: GitHub App token for those repos instead of the classic collaborator token;
-         --repo: attach the box to an existing repo, App token only, nothing in the repo is changed)
+new      create the repo and a box with a short-lived GitHub App token limited to that repo
+         --repos: also give the box tokens for those repos (new repo only)
+         --repo: attach the box to an existing repo; nothing in the repo is changed
+         --classic: the old agent-account token and collaborator invite instead of the App
 reset    delete the box and make a fresh one from the existing repo (at --ref if given)
 retire   delete the box and remove the agent's access to the repo
 destroy  retire, then delete the repo (asks first)
@@ -99,9 +102,10 @@ esac
 
 name="${1:?usage: box $cmd NAME}"; shift
 [[ "$name" =~ ^[a-z][a-z0-9-]*$ ]] || die "NAME must be lowercase letters, digits, dashes (it is also the ssh user): $name"
-ref="" repos="" attach=""
+ref="" repos="" attach="" classic=false
 while [ $# -gt 0 ]; do
   case "$cmd:$1" in
+    new:--classic) classic=true; shift ;;
     new:--repo) attach="${2:?--repo needs owner/name}"; shift 2 ;;
     new:--repos) repos="${2:?--repos needs a value}"; shift 2 ;;
     reset:--ref) ref="${2:?--ref needs a value}"; shift 2 ;;
@@ -109,11 +113,15 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# --repos selects the GitHub App path; reset follows the registry file new left behind.
+# new uses GitHub App tokens unless --classic; every other command follows the registry file new left behind
+# (a box with no registry file is an older classic box).
 reg_dir="${BOX_CONFIG_DIR:-$HOME/.config/agent-boxes}/boxes"
 app=false
 state_dir="${BOX_CONFIG_DIR:-$HOME/.config/agent-boxes}/state"
-{ [ -n "$repos" ] || [ -n "$attach" ] || { [ "$cmd" != new ] && [ -e "$reg_dir/$name.json" ]; }; } && app=true
+if [ "$cmd" = new ]; then
+  ! $classic || [ -z "$repos$attach" ] || die "--classic cannot be combined with --repo or --repos"
+  $classic || app=true
+elif [ -e "$reg_dir/$name.json" ]; then app=true; fi
 if [ -n "$repos" ]; then
   owners=""
   IFS=, read -ra repo_list <<<"$repos"
@@ -214,7 +222,15 @@ Host orb
   if $app; then
     auth_check='[ -s /run/agent/gh-token ] || { echo "box: no App token in the box" >&2; exit 1; }'
     echo "==> Seeding the first GitHub App token"
-    if $dry; then echo "+ box-mint $name | $sandbox seed $name" >&2; else "$mint" "$name" </dev/null | "$sandbox" seed "$name"; fi
+    if $dry; then echo "+ box-mint $name | $sandbox seed $name" >&2; else
+      # A repo created seconds ago may not be visible to the installation yet, so retry.
+      seeded=false
+      for n in 1 2 3; do
+        "$mint" "$name" </dev/null | "$sandbox" seed "$name" && { seeded=true; break; }
+        echo "box: seeding the first token failed (attempt $n/3), retrying" >&2; sleep $((n * 3))
+      done
+      $seeded || die "could not seed the first GitHub App token"
+    fi
   fi
   # The invite can lag behind the PUT, so retry the accept.
   run_in "$sandbox" exec "$name" bash -s <<EOF
@@ -391,7 +407,7 @@ fi
 run gh api -X PATCH "$repo" -F delete_branch_on_merge=true >/dev/null
 run_in gh api -X POST "$repo/rulesets" --input - >/dev/null <<'EOF'
 {
-  "name": "main",
+  "name": "protect-main",
   "target": "branch",
   "enforcement": "active",
   "bypass_actors": [{ "actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "pull_request" }],

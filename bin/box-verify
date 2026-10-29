@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# box-verify BOX: Group 5 security check of a box's GitHub access, always against ericwang05/test.
+# box-verify BOX: security check of a box's GitHub access, against the repo in the box's registry file.
+# Env: VERIFY_PR (an open, unapproved PR for the merge and approve checks), VERIFY_OTHER (a second repo the token must not
+# reach, default ericwang05/test2), VERIFY_ALLOW_WRITE=1 (the control push). Only the throwaway repos test, test2 and test3
+# are allowed, because it attempts forbidden writes; VERIFY_ALLOW_ANY=1 overrides that.
 # Installs a freshly minted App token, then checks: the agent cannot tamper with the token file or
 # install-token; install-token refuses bad input; the App token cannot push to or delete main or edit
 # the ruleset; and the token appears nowhere in the box. Prints PASS/FAIL/SKIP lines and a VERIFY summary.
@@ -13,6 +16,16 @@ die() { echo "box-verify: $*" >&2; exit 1; }
 name="$1"
 [[ "$name" =~ ^[a-z][a-z0-9-]*$ ]] || die "BOX must be lowercase letters, digits, dashes: $name"
 allow="${VERIFY_ALLOW_WRITE:-0}"
+reg="${BOX_CONFIG_DIR:-$HOME/.config/agent-boxes}/boxes/$name.json"
+repo=$(jq -r '.repo // empty' "$reg" 2>/dev/null) || true
+[ -n "$repo" ] || die "no repo recorded in $reg"
+other="${VERIFY_OTHER:-ericwang05/test2}"
+case "$repo" in
+  ericwang05/test | ericwang05/test2 | ericwang05/test3) ;;
+  *) [ "${VERIFY_ALLOW_ANY:-0}" = 1 ] || die "refusing to run against $repo: only the throwaway repos (VERIFY_ALLOW_ANY=1 overrides)" ;;
+esac
+[ "$repo" != "$other" ] || die "VERIFY_OTHER must differ from the box's repo ($repo)"
+jq -e --arg o "$other" '.repos | index($o) == null' "$reg" >/dev/null || die "$other is in the box's registry; pick another VERIFY_OTHER"
 res="$(mktemp -d "${TMPDIR:-/tmp}/box-verify.XXXXXX")"
 trap 'unset tok; rm -rf "$res"' EXIT
 
@@ -55,7 +68,7 @@ read -r -d '' G3 <<'EOF' || true
 set -u
 read -r VERIFY_TOKEN || { echo "FAIL: token missing on stdin"; exit 0; }
 export VERIFY_TOKEN
-repo=ericwang05/test; api="https://api.github.com/repos/$repo"; pr="${VERIFY_PR:-1}"
+repo="$VERIFY_REPO"; api="https://api.github.com/repos/$repo"; pr="${VERIFY_PR:-1}"
 tmp=$(mktemp -d) || { echo "FAIL: no temp dir"; exit 0; }
 trap 'rm -rf "$tmp"' EXIT
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
@@ -118,7 +131,7 @@ fi
 
 # Another repo in the same installation. The token is minted for $repo only, so it must not reach $other.
 # $other is public, so a plain read can never be refused: check the token's scope list and a read that needs push access.
-other=ericwang05/test2
+other="$VERIFY_OTHER"
 if jq -e --arg r "$other" '[.repositories[].full_name] | index($r) == null' "$tmp/inst.json" >/dev/null 2>&1; then
   emit PASS "token scope does not list $other"
 else emit FAIL "STOP: token scope lists $other"; exit 0; fi
@@ -213,7 +226,7 @@ group2() {
 
 group3() {
   local f="$res/30-group3" out
-  out=$(printf '%s\n' "$tok" | orb -m "$name" env VERIFY_ALLOW_WRITE="$allow" VERIFY_PR="${VERIFY_PR:-1}" bash -c "$G3" 2>/dev/null) \
+  out=$(printf '%s\n' "$tok" | orb -m "$name" env VERIFY_ALLOW_WRITE="$allow" VERIFY_PR="${VERIFY_PR:-1}" VERIFY_REPO="$repo" VERIFY_OTHER="$other" bash -c "$G3" 2>/dev/null) \
     || rec "$f" FAIL "GitHub checks did not run"
   keep "$out" "$f"
   case $out in *"FAIL: STOP"*) : >"$res/stop" ;; esac

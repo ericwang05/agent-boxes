@@ -123,6 +123,7 @@ daemon() {
   done
 }
 
+# The job runs under /bin/bash (3.2) because that is what the refresher was tested with, not whichever bash ran this.
 plist() {
   cat <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -131,7 +132,7 @@ plist() {
 <dict>
   <key>Label</key><string>$LABEL</string>
   <key>ProgramArguments</key>
-  <array><string>$SH</string><string>$HERE/box-refresh</string><string>--daemon</string></array>
+  <array><string>/bin/bash</string><string>$HERE/box-refresh</string><string>--daemon</string></array>
   <key>EnvironmentVariables</key>
   <dict>
     <key>HOME</key><string>$HOME</string>
