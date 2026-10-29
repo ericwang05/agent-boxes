@@ -54,25 +54,14 @@ mint_seed() {
   printf '%s\n' "$tok" | "$SH" "$SANDBOX" seed "$1" 2>>"$ERRF"
 }
 
-warn_if_expiring() {
-  local b=$1 exp=0
-  [ ! -r "$STATE/$b.expiry" ] || exp=$(cat "$STATE/$b.expiry")
-  [ $((exp - $(date +%s))) -lt 600 ] || return 0
-  # at most one notification per box per 10 minutes
-  [ -z "$(find "$STATE/$b.notified" -mmin -10 2>/dev/null)" ] || return 0
-  : >"$STATE/$b.notified"
-  /usr/bin/osascript -e "display notification \"$b has under 10 minutes of GitHub token left\" with title \"agent-boxes\"" >/dev/null 2>&1 || true
-}
-
 # $1 box, $2 attempts. Retries with backoff; the first token error line is logged, never the token.
 refresh_box() {
-  local b=$1 tries=$2 n=1 delay=2 repos iso exp
+  local b=$1 tries=$2 n=1 delay=2 repos iso
   repos=$("$JQ" -r '.repos | join(",")' "$REG/$b.json" 2>/dev/null) || repos=unreadable-registry
   ERRF=$(mktemp "$STATE/err.XXXXXX")
   while :; do
     if with_timeout 90 mint_seed "$b"; then
       iso=$(sed -n 's/^expires_at=//p' "$ERRF" | head -n1)
-      exp=$(date -j -u -f %Y-%m-%dT%H:%M:%SZ "$iso" +%s 2>/dev/null) && echo "$exp" >"$STATE/$b.expiry"
       log "box=$b repos=$repos expires=${iso:-unknown} ok"
       rm -f "$ERRF" "$STATE/$b.failed"; return 0
     fi
@@ -81,7 +70,6 @@ refresh_box() {
   done
   log "box=$b repos=$repos FAILED after $n attempt(s): $(grep -v '^expires_at=' "$ERRF" | head -n1 | cut -c1-120)"
   rm -f "$ERRF"; : >"$STATE/$b.failed"
-  warn_if_expiring "$b"
   return 1
 }
 

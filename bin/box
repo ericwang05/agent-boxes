@@ -186,7 +186,7 @@ delete_repo() {
 # Take away what the box could do on GitHub: stop minting for it (App path) or drop the collaborator (classic).
 retire_access() {
   if $app; then
-    run rm -f "$reg_dir/$name.json" "$state_dir/$name.expiry" "$state_dir/$name.notified" "$state_dir/$name.failed"
+    run rm -f "$reg_dir/$name.json" "$state_dir/$name.failed"
     echo "box: $name is no longer refreshed. Its last token expires within 1 hour; to cut it off sooner, run: box panic" >&2
   else
     run gh api -X DELETE "$repo/collaborators/$agent" >/dev/null
