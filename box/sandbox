@@ -138,6 +138,16 @@ inject_token() {
       fi'
 }
 
+# GitHub App path (replaces the classic token): install the root-owned tools, then seed a token.
+install_app_token_tools() {
+  orb -m "$1" -u root env SETUP_USER="$SANDBOX_USER" bash -s < "$HERE/app-token.sh"
+}
+
+# Reads one token on stdin; stdin only, so it never lands in argv.
+seed_token() {
+  orb -m "$1" -u root /usr/local/sbin/install-token
+}
+
 cmd="${1:-help}"; shift || true
 case "$cmd" in
   base)
