@@ -13,7 +13,7 @@ dry=false
 
 usage() {
   cat <<'EOF'
-Usage: box [--dry-run] new NAME
+Usage: box [--dry-run] new NAME [--repos owner/repo[,owner/repo]]
        box [--dry-run] reset NAME [--ref COMMIT]
        box [--dry-run] retire NAME
        box [--dry-run] destroy NAME
@@ -21,7 +21,7 @@ Usage: box [--dry-run] new NAME
        box [--dry-run] base
        box ls
 
-new      create the repo and a box
+new      create the repo and a box (--repos: GitHub App token for those repos instead of the classic collaborator token)
 reset    delete the box and make a fresh one from the existing repo (at --ref if given)
 retire   delete the box and remove the agent's access to the repo
 destroy  retire, then delete the repo (asks first)
@@ -79,13 +79,28 @@ esac
 
 name="${1:?usage: box $cmd NAME}"; shift
 [[ "$name" =~ ^[a-z][a-z0-9-]*$ ]] || die "NAME must be lowercase letters, digits, dashes (it is also the ssh user): $name"
-ref=""
+ref="" repos=""
 while [ $# -gt 0 ]; do
   case "$cmd:$1" in
+    new:--repos) repos="${2:?--repos needs a value}"; shift 2 ;;
     reset:--ref) ref="${2:?--ref needs a value}"; shift 2 ;;
     *) usage >&2; die "unknown argument: $1" ;;
   esac
 done
+
+# --repos selects the GitHub App path; reset follows the registry file new left behind.
+reg_dir="${BOX_CONFIG_DIR:-$HOME/.config/agent-boxes}/boxes"
+app=false
+{ [ -n "$repos" ] || { [ "$cmd" = reset ] && [ -e "$reg_dir/$name.json" ]; }; } && app=true
+if [ -n "$repos" ]; then
+  owners=""
+  IFS=, read -ra repo_list <<<"$repos"
+  for r in "${repo_list[@]}"; do
+    [[ "$r" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "invalid --repos entry (want owner/repo): $r"
+    owners+="${r%%/*}"$'\n'
+  done
+  [ "$(printf '%s' "$owners" | sort -u | wc -l)" -eq 1 ] || die "--repos must all share one owner"
+fi
 
 # Validate everything up front so a bad flag never leaves a half-made box.
 [ -r "$config" ] || die "missing $config (set OWNER=<github user> and AGENT=<agent github user>)"
@@ -212,6 +227,7 @@ case "$cmd" in
   reset)
     machine_remove
     run "$sandbox" rm "$name"
+    # HOOK (app path): first-token provisioning for reset goes here when $app is true.
     provision 0
     echo "box $name reset${ref:+ at $ref}: github.com/$owner/$name"
     exit ;;
@@ -304,10 +320,19 @@ run_in gh api -X POST "$repo/rulesets" --input - >/dev/null <<'EOF'
   ]
 }
 EOF
-run gh api -X PUT "$repo/collaborators/$agent" -f permission=push >/dev/null
+if $app; then
+  # Registry file: the repos this box may get tokens for (read by bin/box-mint). Dir 700, file 600.
+  if $dry; then echo "+ write $reg_dir/$name.json {\"repos\":[$repos]} (mode 600)" >&2
+  else
+    (umask 077; mkdir -p "$reg_dir"; jq -nc --arg r "$repos" '{repos: ($r | split(","))}' >"$reg_dir/$name.json")
+  fi
+  # HOOK (app path): first-token provisioning for new goes here (bin/box-mint "$name" into the box).
+else
+  run gh api -X PUT "$repo/collaborators/$agent" -f permission=push >/dev/null
+fi
 
 # --- new, 2. Box side ---
-provision 1
+if $app; then provision 0; else provision 1; fi
 armed=false
 
 echo "box $name ready: github.com/$owner/$name"
