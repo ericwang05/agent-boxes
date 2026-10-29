@@ -55,7 +55,7 @@ read -r -d '' G3 <<'EOF' || true
 set -u
 read -r VERIFY_TOKEN || { echo "FAIL: token missing on stdin"; exit 0; }
 export VERIFY_TOKEN
-repo=ericwang05/test; api="https://api.github.com/repos/$repo"
+repo=ericwang05/test; api="https://api.github.com/repos/$repo"; pr="${VERIFY_PR:-1}"
 tmp=$(mktemp -d) || { echo "FAIL: no temp dir"; exit 0; }
 trap 'rm -rf "$tmp"' EXIT
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
@@ -97,6 +97,16 @@ git_ clone -q "https://github.com/$repo.git" "$tmp/r" >/dev/null 2>&1 || { emit 
 cd "$tmp/r"
 git -c user.name=verify -c user.email=verify@example.invalid commit -q --allow-empty -m "verify probe" \
   || { emit FAIL "local probe commit"; exit 0; }
+
+# The merge attempt goes first. Anything but a 4xx refusal means the ruleset failed: stop the whole run at once.
+code=$(call PUT "$api/pulls/$pr/merge" "$tmp/o.json" -H 'Content-Type: application/json' --data '{"merge_method":"merge"}')
+case $code in
+  4??) emit PASS "merge PR #$pr rejected ($code)" ;;
+  *) emit FAIL "STOP: merge of PR #$pr was NOT refused ($code)"; exit 0 ;;
+esac
+# The PR's author is this same App, and an author cannot approve its own PR.
+api_check "approve PR #$pr" POST "$api/pulls/$pr/reviews" "$tmp/o.json" \
+  -H 'Content-Type: application/json' --data '{"event":"APPROVE"}'
 
 git_check "direct push to main" push -q origin HEAD:refs/heads/main
 git_check "delete main by git push" push -q origin :refs/heads/main
@@ -183,10 +193,12 @@ group3() {
   out=$(printf '%s\n' "$tok" | orb -m "$name" env VERIFY_ALLOW_WRITE="$allow" bash -c "$G3" 2>/dev/null) \
     || rec "$f" FAIL "GitHub checks did not run"
   keep "$out" "$f"
+  case $out in *"FAIL: STOP"*) : >"$res/stop" ;; esac
 }
 
 group4() {
   local f="$res/40-group4" out
+  [ ! -e "$res/stop" ] || { rec "$f" SKIP "leak search (stopped: a protected action was accepted)"; return 0; }
   out=$(printf '%s\n' "$tok" | orb -m "$name" -u root bash -c "$G4" 2>/dev/null) \
     || rec "$f" FAIL "leak search did not run"
   keep "$out" "$f"
@@ -195,7 +207,7 @@ group4() {
 # setup mints the token (kept in $tok) and installs it, so the token file exists for groups 1 and 2.
 setup() {
   local f="$res/00-setup"
-  if tok=$("$here/box-mint" "$name" 2>/dev/null) && [[ "$tok" =~ ^ghs_[A-Za-z0-9_]+$ ]]; then
+  if tok=$("$here/box-mint" "$name" 2>/dev/null) && [[ "$tok" =~ ^ghs_[A-Za-z0-9_.-]+$ ]]; then # real tokens contain dots
     rec "$f" PASS "mint App token"
   else
     tok=""
@@ -218,6 +230,7 @@ finish() {
   f=$(printf '%s\n' "$all" | grep -c '^FAIL: ' || true)
   s=$(printf '%s\n' "$all" | grep -c '^SKIP: ' || true)
   echo "VERIFY: $p passed, $f failed, $s skipped"
+  [ ! -e "$res/stop" ] || echo "STOPPED: a protected GitHub action was accepted; nothing further was attempted"
   [ "$f" = 0 ]
 }
 
