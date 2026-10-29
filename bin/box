@@ -56,7 +56,7 @@ case "$cmd" in
     run mkdir -p "${BOX_CONFIG_DIR:-$HOME/.config/agent-boxes}/state"
     run touch "${BOX_CONFIG_DIR:-$HOME/.config/agent-boxes}/state/panic"
     run /bin/launchctl bootout "gui/$(id -u)/dev.agent-boxes.refresh" || true
-    while read -r m; do run orb stop "$m" </dev/null || true; done < <(orb list | awk '$2 == "running" { print $1 }')
+    while read -r m; do run orb stop "$m" </dev/null || true; done < <(orb list | awk '$2 == "running" && $1 != "box-base" { print $1 }')
     cat <<'EOF'
 
 Boxes stopped and the refresher is off. Tokens already issued stay valid for up to 1 hour
