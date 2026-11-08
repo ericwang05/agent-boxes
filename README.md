@@ -24,7 +24,7 @@ status log copy (append-only)  <-- orb run cat -- ~/.box/status.log (agent appen
 | `box rm NAME` | Delete the box, its proxy and bridge. The repo and status history stay |
 | `box panic` | Stop every box, bridge and proxy now |
 | `box base` | Rebuild `box-base`, the bridge binaries, and apply `box/claude` |
-| `box setup` / `box token claude\|github` | One-time setup on a new Mac; add or replace a real token in the Keychain |
+| `box setup` / `box token NAME` | One-time setup on a new Mac; add or replace a real token in the Keychain |
 | `box ls` | List machines |
 
 ## Set up on a new Mac
@@ -34,7 +34,7 @@ status log copy (append-only)  <-- orb run cat -- ~/.box/status.log (agent appen
 3. `git clone` this repo, put `bin/box` on your PATH, and run `box setup`. It asks for your GitHub login, the bot's login and your git identity, saves them in `~/.config/agent-boxes/config`, asks for each missing token (stored only in the Keychain), adds the `Host orb` ssh entry, and builds `box-base` (a few minutes).
 4. `box new myapp`.
 
-Replace a token later with `box token claude` or `box token github`. Rerunning `box setup` is safe; it only fills in what is missing.
+Add or replace a token later with `box token NAME` (`claude` and `github` are the built-in names; the Keychain item is `agentbox-NAME`). The proxy only injects those two for now; a new service also needs a route in `proxy/proxy.py`. Rerunning `box setup` is safe; it only fills in what is missing.
 
 ## What protects what
 
