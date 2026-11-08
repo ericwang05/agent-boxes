@@ -43,13 +43,13 @@ status log copy (append-only)  <-- orb run cat -- ~/.box/status.log (agent appen
 | Box reaches your Mac or home network | OrbStack `--isolated` plus a root-owned nftables file: LAN, private ranges, multicast, IPv6 rejected; only 53, 80, 443 out. No sudo |
 | Agent edits Claude's settings | `/etc/claude-code/managed-settings.json` is root-owned |
 | Secrets pushed to GitHub | GitHub secret scanning and push protection on every repo `box new` makes |
-| Install scripts and brand-new packages | Off / skipped for 7 days (see Packages) |
+| Install scripts and brand-new packages | A request in the box `CLAUDE.md` (no install scripts, nothing newer than 7 days). Not enforced |
 
 ## Accepted gaps
 
 - With 80/443 open the agent can still send repo code anywhere. The design protects **tokens, not data**. The repos are public anyway.
 - An injected agent could misuse your home internet address over 80/443 (for example hammering a website).
-- "If anything is unclear or blocked, stop and ask" in the box `CLAUDE.md` is a request, not a control.
+- "If anything is unclear or blocked, stop and ask" and the 7-day package rule in the box `CLAUDE.md` are requests, not controls.
 - Pro usage is the real cap on parallel boxes.
 - With the Mac asleep or the proxy down, Claude shows its own error and stops after about 3 minutes.
 - Claude shows "Remote managed settings failed to load (401)" in every pane: its policy call goes direct with a fake token. Harmless.
@@ -64,7 +64,7 @@ DNS tunnelling, a marketplace allow-list for plugins, fine-grained GitHub tokens
 - `proxy/proxy.py` the per-box proxy (Python stdlib, one file). `bridge/` the Go bridge (frozen; built into `build/` by `box base`).
 - Mac state in `~/.config/agent-boxes/`: `config`, `box-repos/` (box to repo), `run/` (sockets, mode 700), `logs/` (JSON lines from the proxy; no header values), `status/` (append-only copies of each box's status log).
 - launchd jobs `dev.agent-boxes.<box>-proxy` and `-bridge` in `~/Library/LaunchAgents`, written by `box new`, removed by `box rm` and `box panic`.
-- Evidence for the design: `POC-ROUND4-REPORT.md`, `POC-ROUND3-REPORT.md`. The earlier GitHub App flow is in git history (branch `app-token`).
+- `MVP-HANDOFF.md` records the design decisions. The earlier GitHub App flow is on branch `app-token`.
 
 ## Rules to keep
 

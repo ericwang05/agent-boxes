@@ -3,7 +3,7 @@
 ## Everyday
 
 - **Start:** `box new myapp` (or `--repo you/existing`). A herdr pane opens in the box with Claude running; type the task there.
-- **Packages:** put them in the project's `flake.nix` dev shell. Set npm's minimum release age (7 days) and disable install scripts in the project; uv: `exclude-newer`. Checking these per project is still manual.
+- **Packages:** the agent adds them through the project's `flake.nix` dev shell. The 7-day and no-install-scripts rule is a request in the box `CLAUDE.md`, not enforced.
 - **See what the agents did:** `box status`, `box status myapp --history`.
 - **Review and merge:** open the PR on GitHub, approve, merge. The bot can't merge or approve; main needs 1 approval from you.
 - **Roll back:** `box reset myapp --to <commit | pr/N | status/N>`.
