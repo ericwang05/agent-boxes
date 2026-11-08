@@ -1,209 +1,211 @@
 #!/usr/bin/env bash
-# box new|reset|retire|destroy|rm|base|ls: the environment for a project, not its workflow.
-# new: GitHub repo (empty nix dev shell) plus a sandboxed machine and a herdr workspace; it never starts an agent.
-# reset: rebuild the machine from the existing repo, optionally at a commit. retire: remove the machine and the agent's access.
-# destroy: retire plus delete the repo. A failed new rolls back the repo and box. base: build box-base and apply box/claude.
-# Box layer: box/sandbox new|seed|exec|rm|ls <name>. Boxes get short-lived GitHub App tokens (bin/box-mint, kept fresh by
-# bin/box-refresh); `new --classic` uses the old agent-account token instead.
-# Config: ~/.config/agent-boxes/config sets OWNER (GitHub user owning repos) and AGENT (agent GitHub username).
+# box new|status|reset|rm|panic|base|ls: the environment for a project, not its workflow.
+# new: GitHub repo (empty nix dev shell, locked main) plus a sandboxed machine, a per-box proxy and bridge under launchd,
+# and a herdr pane with Claude Code running. The box holds fake tokens only; the proxy on this Mac holds the real ones (Keychain).
+# Box layer: box/sandbox. Proxy: proxy/proxy.py. Bridge: bridge/ (Go). Config: ~/.config/agent-boxes/config (OWNER, AGENT).
 set -euo pipefail
 
-sandbox="${BOX_SANDBOX:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../box/sandbox}"
-mint="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/box-mint"
-config="$HOME/.config/agent-boxes/config"
-dry=false
+root="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+sandbox="${BOX_SANDBOX:-$root/box/sandbox}"
+cfg="${BOX_CONFIG_DIR:-$HOME/.config/agent-boxes}"
+config="$cfg/config"
+reg_dir="$cfg/box-repos" run_dir="$cfg/run" log_dir="$cfg/logs" status_dir="$cfg/status"
+agents_dir="$HOME/Library/LaunchAgents"
+uid="$(id -u)"
 
 usage() {
   cat <<'EOF'
-Usage: box [--dry-run] new NAME [--repo owner/name | --repos owner/name[,owner/name] | --classic]
-       box [--dry-run] reset NAME [--ref COMMIT]
-       box [--dry-run] retire NAME
-       box [--dry-run] destroy NAME
-       box [--dry-run] rm NAME
-       box [--dry-run] base
-       box [--dry-run] panic
+Usage: box new NAME [--repo owner/name]
+       box status [NAME] [--history]
+       box reset NAME --to <commit | pr/N | status/N>
+       box rm NAME
+       box panic
+       box base
        box ls
 
-new      create the repo and a box with a short-lived GitHub App token limited to that repo
-         --repos: also give the box tokens for those repos (new repo only)
-         --repo: attach the box to an existing repo; nothing in the repo is changed
-         --classic: the old agent-account token and collaborator invite instead of the App
-reset    delete the box and make a fresh one from the existing repo (at --ref if given)
-retire   delete the box and remove the agent's access to the repo
-destroy  retire, then delete the repo (asks first)
-rm       delete the box only; the repo and access stay
-base     (re)build box-base and apply box/claude to it
-panic    stop the token refresher and every box, then print how to suspend the GitHub App
-
---dry-run prints every command instead of running it.
+new      create the repo (or attach with --repo), lock main, make the box, start its proxy and bridge, open the herdr pane
+status   one row per box from its status log; --history shows the full timeline (status/N numbers for reset)
+reset    delete the box and rebuild it at that commit, PR head or status entry
+rm       delete the box and its proxy and bridge; the repo and status history stay
+panic    stop every box, bridge and proxy now
+base     (re)build box-base, the bridge binaries and apply box/claude
 EOF
 }
 die() { echo "box: $*" >&2; exit 1; }
 
-# Run a command, or just print it under --dry-run.
-run() {
-  if $dry; then { printf '+'; printf ' %q' "$@"; echo; } >&2; else "$@"; fi
-}
-# Run a command whose stdin is a heredoc: print the heredoc too under --dry-run.
-run_in() {
-  if $dry; then { printf '+'; printf ' %q' "$@"; echo ' <<STDIN'; cat; echo STDIN; } >&2; else "$@"; fi
-}
-
-[ "${1:-}" != --dry-run ] || { dry=true; shift; }
 cmd="${1:-}"; shift || true
+claude_dir="$root/box/claude"
 
-claude_dir="$(dirname "$sandbox")/claude"
+# The Mac side of a box: one proxy and one bridge under launchd, one Unix socket between them (folder mode 700).
+label() { echo "dev.agent-boxes.$1-$2"; }
+write_plist() { # name kind program args...
+  local name="$1" kind="$2" f="$agents_dir/dev.agent-boxes.$1-$2.plist"; shift 2
+  mkdir -p "$agents_dir" "$log_dir"
+  {
+    echo '<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict>'
+    echo "<key>Label</key><string>$(label "$name" "$kind")</string><key>ProgramArguments</key><array>"
+    printf '<string>%s</string>' "$@"
+    echo '</array><key>EnvironmentVariables</key><dict><key>PATH</key><string>/opt/homebrew/bin:/usr/bin:/bin</string>'
+    echo "<key>BRIDGE_DIR</key><string>$log_dir</string></dict>"
+    echo "<key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>1</integer>"
+    echo "<key>StandardOutPath</key><string>$log_dir/$name.$kind.log</string><key>StandardErrorPath</key><string>$log_dir/$name.$kind.log</string>"
+    echo '</dict></plist>'
+  } >"$f"
+}
+jobs_start() { # name owner/repo
+  local name="$1" sock="$run_dir/$1.sock"
+  [ -x "$root/build/agentbox-bridge" ] || die "bridge not built; run: box base"
+  mkdir -p "$run_dir" "$log_dir" "$status_dir"; chmod 700 "$run_dir"
+  jobs_stop "$name"
+  write_plist "$name" proxy /usr/bin/python3 -I "$root/proxy/proxy.py" --box "$name" --repo "$2" --sock "$sock"
+  launchctl bootstrap "gui/$uid" "$agents_dir/$(label "$name" proxy).plist"
+  for _ in $(seq 20); do [ -S "$sock" ] && break; sleep 0.5; done
+  [ -S "$sock" ] || die "proxy for $name did not start; see $log_dir/$name.proxy.log"
+  write_plist "$name" bridge "$root/build/agentbox-bridge" mac-side -box "$name" -dial "unix:$sock" -max-streams 64 -rate 100 -idle 2m -life 0
+  launchctl bootstrap "gui/$uid" "$agents_dir/$(label "$name" bridge).plist"
+}
+jobs_stop() {
+  local k
+  for k in bridge proxy; do # bridge first, or it restart-loops against a dead socket
+    launchctl bootout "gui/$uid/$(label "$1" $k)" 2>/dev/null || true
+    rm -f "$agents_dir/$(label "$1" $k).plist"
+  done
+  rm -f "$run_dir/$1.sock"
+}
+
 case "$cmd" in
-  ls) run "$sandbox" ls; exit ;;
+  ls) "$sandbox" ls; exit ;;
   panic)
-    # The flag keeps any refresher from minting again; bootout unloads the launchd job if it is installed.
-    run mkdir -p "${BOX_CONFIG_DIR:-$HOME/.config/agent-boxes}/state"
-    run touch "${BOX_CONFIG_DIR:-$HOME/.config/agent-boxes}/state/panic"
-    run /bin/launchctl bootout "gui/$(id -u)/dev.agent-boxes.refresh" || true
-    while read -r m; do run orb stop "$m" </dev/null || true; done < <(orb list | awk '$2 == "running" && $1 != "box-base" { print $1 }')
-    cat <<'EOF'
-
-Boxes stopped and the refresher is off. Tokens already issued stay valid for up to 1 hour
-(revoking one can lag on git, so do not rely on it). To cut GitHub access now:
-  1. github.com/settings/installations > eric-w-agent > Configure
-  2. Danger zone > Suspend (reversible) or Uninstall
-  3. If the private key may have leaked: github.com/settings/apps/eric-w-agent > Private keys > delete it
-To resume: rm ~/.config/agent-boxes/state/panic, unsuspend the App, start the boxes, reload the launchd job.
-EOF
+    for f in "$agents_dir"/dev.agent-boxes.*.plist; do
+      [ -e "$f" ] || continue
+      launchctl bootout "gui/$uid/$(basename "$f" .plist)" 2>/dev/null || true
+      rm -f "$f"
+    done
+    rm -f "$run_dir"/*.sock
+    # herdr reconnects over ssh and would wake a stopped box, so disable its machine first.
+    while read -r m; do
+      id="$(herdr machine list --json | jq -r --arg l "$m" '[.. | objects | select(.label? == $l) | .id][0] // empty')"
+      [ -z "$id" ] || herdr machine disable "$id" </dev/null || true
+      orb stop "$m" </dev/null || true
+    done < <(orb list | awk '$2 == "running" && $1 != "box-base" { print $1 }')
+    echo "Every box, bridge and proxy is stopped. Bring a box back with: box reset NAME --to <commit>"
     exit ;;
   base)
     [ -s "$claude_dir/settings.json" ] || die "missing $claude_dir/settings.json"
     ! grep -rqiE 'ghp_|github_pat_|sk-ant|oauth' "$claude_dir" || die "$claude_dir must not hold tokens"
-    run "$sandbox" base
-    if $dry; then echo "+ tar -C $claude_dir -cf - . | orb -m box-base <copy into ~/.claude, merging settings.json with jq>" >&2
-    else
-      orb start box-base
-      # settings.json is merged into the base's own; everything else is copied over.
-      tar -C "$claude_dir" -cf - . | orb -m box-base bash -lc '
-        set -e
-        stage="$(mktemp -d)"; tar -C "$stage" -xf -
-        mkdir -p ~/.claude; s=~/.claude/settings.json; [ -s "$s" ] || echo "{}" > "$s"
-        jq -s ".[0] * .[1]" "$s" "$stage/settings.json" > "$s.tmp" && mv "$s.tmp" "$s"
-        rm "$stage/settings.json"; cp -R "$stage/." ~/.claude/; rm -rf "$stage"'
-    fi
+    "$sandbox" base
+    orb start box-base
+    # settings.json is merged into the base's own; everything else is copied over.
+    tar -C "$claude_dir" -cf - . | orb -m box-base bash -lc '
+      set -e
+      stage="$(mktemp -d)"; tar -C "$stage" -xf -
+      mkdir -p ~/.claude; s=~/.claude/settings.json; [ -s "$s" ] || echo "{}" > "$s"
+      jq -s ".[0] * .[1]" "$s" "$stage/settings.json" > "$s.tmp" && mv "$s.tmp" "$s"
+      rm "$stage/settings.json"; cp -R "$stage/." ~/.claude/; rm -rf "$stage"'
     while read -r plugin; do
       src="$(jq -r --arg m "${plugin#*@}" '.extraKnownMarketplaces[$m].source | .repo // .url // empty' "$claude_dir/settings.json")"
       [ -n "$src" ] || die "no marketplace source for $plugin in extraKnownMarketplaces"
-      # marketplace add fails if it is already there; install below still fails if it is truly missing.
+      # marketplace add fails if it is already there; install still fails if it is truly missing.
       # </dev/null: orb would otherwise eat the rest of the plugin list from the loop's stdin.
-      run orb -m box-base bash -lc 'claude plugin marketplace add "$1" || true; claude plugin install "$2"' _ "$src" "$plugin" </dev/null
+      orb -m box-base bash -lc 'claude plugin marketplace add "$1" || true; claude plugin install "$2"' _ "$src" "$plugin" </dev/null
     done < <(jq -r '.enabledPlugins // {} | keys[]' "$claude_dir/settings.json")
-    $dry || orb stop box-base
+    orb stop box-base
     exit ;;
-  new | reset | retire | destroy | rm) ;;
+  new | reset | rm | status) ;;
   -h | --help | "") usage; exit ;;
   *) usage >&2; die "unknown command: $cmd" ;;
 esac
 
+# --- status: pull each box's status log into the append-only Mac copy, then show it ---
+# The box can write anything, so each line is checked: time, state, commit (hex) and a short safe task; the rest is dropped.
+valid_status='BEGIN { FS = "\t" } NF == 4 && $1 ~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$/ && $2 ~ /^(working|done|needs-you|blocked)$/ && $3 ~ /^[0-9a-f]{7,40}$/ && length($4) <= 200 && $4 ~ /^[A-Za-z0-9 ._,:;\/#@()+=?-]*$/'
+pull_status() { # name
+  local f="$status_dir/$1.log" line
+  mkdir -p "$status_dir"; touch "$f"
+  orb -m "$1" bash -c 'cat ~/.box/status.log 2>/dev/null || true' 2>/dev/null </dev/null | awk "$valid_status" | while IFS= read -r line; do
+    grep -qxF -- "$line" "$f" || printf '%s\n' "$line" >>"$f"
+  done
+}
+if [ "$cmd" = status ]; then
+  want="" hist=false
+  for a in "$@"; do case "$a" in --history) hist=true ;; -*) die "unknown argument: $a" ;; *) want="$a" ;; esac; done
+  names=$(cd "$reg_dir" 2>/dev/null && ls | sed 's/\.json$//' || true)
+  [ -z "$want" ] || names="$want"
+  for n in $names; do
+    orb list 2>/dev/null | awk -v n="$n" '$1 == n && $2 == "running" { f=1 } END { exit !f }' && pull_status "$n" || true
+    f="$status_dir/$n.log"
+    [ -s "$f" ] || { printf '%-12s %s\n' "$n" "no status yet"; continue; }
+    if $hist; then echo "== $n"; awk -F'\t' '{ printf "%3d  %s  %-9s %s  %s\n", NR, $1, $2, substr($3, 1, 7), $4 }' "$f"; continue; fi
+    repo="$(jq -r '.repo // empty' "$reg_dir/$n.json" 2>/dev/null || true)"
+    IFS=$'\t' read -r t s c k < <(tail -n 1 "$f")
+    pr=""; [ -z "$repo" ] || pr="$(gh api "repos/$repo/commits/$c/pulls" --jq '.[0].html_url // empty' 2>/dev/null || true)"
+    printf '%-12s %-9s %-40.40s %s  %s  %s\n' "$n" "$s" "$k" "${c:0:7}" "$t" "$pr"
+  done
+  exit
+fi
+
 name="${1:?usage: box $cmd NAME}"; shift
 [[ "$name" =~ ^[a-z][a-z0-9-]*$ ]] || die "NAME must be lowercase letters, digits, dashes (it is also the ssh user): $name"
-ref="" repos="" attach="" classic=false
+attach="" to=""
 while [ $# -gt 0 ]; do
   case "$cmd:$1" in
-    new:--classic) classic=true; shift ;;
     new:--repo) attach="${2:?--repo needs owner/name}"; shift 2 ;;
-    new:--repos) repos="${2:?--repos needs a value}"; shift 2 ;;
-    reset:--ref) ref="${2:?--ref needs a value}"; shift 2 ;;
+    reset:--to) to="${2:?--to needs a value}"; shift 2 ;;
     *) usage >&2; die "unknown argument: $1" ;;
   esac
 done
 
-# new uses GitHub App tokens unless --classic; every other command follows the registry file new left behind
-# (a box with no registry file is an older classic box).
-reg_dir="${BOX_CONFIG_DIR:-$HOME/.config/agent-boxes}/box-repos"
-app=false
-state_dir="${BOX_CONFIG_DIR:-$HOME/.config/agent-boxes}/state"
-if [ "$cmd" = new ]; then
-  ! $classic || [ -z "$repos$attach" ] || die "--classic cannot be combined with --repo or --repos"
-  $classic || app=true
-elif [ -e "$reg_dir/$name.json" ]; then app=true; fi
-if [ -n "$repos" ]; then
-  owners=""
-  IFS=, read -ra repo_list <<<"$repos"
-  for r in "${repo_list[@]}"; do
-    [[ "$r" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "invalid --repos entry (want owner/repo): $r"
-    owners+="${r%%/*}"$'\n'
-  done
-  [ "$(printf '%s' "$owners" | sort -u | wc -l)" -eq 1 ] || die "--repos must all share one owner"
-fi
-
-# Validate everything up front so a bad flag never leaves a half-made box.
 [ -r "$config" ] || die "missing $config (set OWNER=<github user> and AGENT=<agent github user>)"
 OWNER="" AGENT=""
 # shellcheck disable=SC1090
 . "$config"
 [ -n "$OWNER" ] && [ -n "$AGENT" ] || die "$config must set OWNER and AGENT"
-owner="$OWNER" agent="$AGENT"
-# The box's own repo is owner/name unless new --repo attached it to an existing one; the registry remembers which.
-rowner="$owner" rname="$name" attached=false
+rowner="$OWNER" rname="$name" attached=false
 if [ -n "$attach" ]; then
   [[ "$attach" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "invalid --repo (want owner/name): $attach"
-  [ -z "$repos" ] || die "use --repo or --repos, not both"
-  [ "${attach%%/*}" = "$owner" ] || die "--repo must belong to $owner: $attach"
+  [ "${attach%%/*}" = "$OWNER" ] || die "--repo must belong to $OWNER: $attach"
   rowner="${attach%%/*}" rname="${attach#*/}" attached=true
 elif [ "$cmd" != new ] && [ -e "$reg_dir/$name.json" ]; then
   r="$(jq -r '.repo // empty' "$reg_dir/$name.json")"; [ -z "$r" ] || { rowner="${r%%/*}" rname="${r#*/}"; }
   [ "$(jq -r '.attached // false' "$reg_dir/$name.json")" != true ] || attached=true
 fi
-repo="repos/$rowner/$rname"
-if [ -n "$repos" ]; then
-  for r in "${repo_list[@]}"; do [ "${r%%/*}" = "$owner" ] || die "--repos entries must belong to $owner: $r"; done
+repo="$rowner/$rname"
+for tool in gh git herdr jq go; do command -v "$tool" >/dev/null || die "$tool not found"; done
+[ -x "$sandbox" ] || die "box layer not found or not executable: $sandbox"
+[ "$(gh api user --jq .login 2>/dev/null)" = "$OWNER" ] || die "gh is not logged in as $OWNER; run: gh auth login"
+for k in agentbox-claude agentbox-github; do security find-generic-password -s "$k" >/dev/null 2>&1 || die "Keychain has no '$k' entry"; done
+if [ "$cmd" = new ]; then
+  [ -n "$attach" ] || ! gh repo view "$repo" >/dev/null 2>&1 || die "repo $repo already exists"
+  # A failed new removes the box named $name, so never start over an existing one.
+  ! "$sandbox" ls | awk -v n="$name" '$1 == n { f=1 } END { exit !f }' || die "box $name already exists"
 fi
-[[ -z "$ref" || "$ref" =~ ^[A-Za-z0-9_][A-Za-z0-9._/-]*$ ]] || die "invalid --ref: $ref"
-if ! $dry; then
-  for tool in gh git herdr jq; do command -v "$tool" >/dev/null || die "$tool not found"; done
-  [ -x "$sandbox" ] || die "box layer not found or not executable: $sandbox"
-  [ "$(gh api user --jq .login 2>/dev/null)" = "$owner" ] || die "gh is not logged in as $owner; run: gh auth login"
-  if [ "$cmd" = new ]; then
-    [ -n "$attach" ] || ! gh repo view "$owner/$name" >/dev/null 2>&1 || die "repo $owner/$name already exists"
-    # A failed new removes the box named $name, so never start over an existing one.
-    ! "$sandbox" ls | awk -v n="$name" '$1 == n { f=1 } END { exit !f }' || die "box $name already exists"
-  fi
-  if [ "$cmd" != rm ] && { [ "$cmd" != new ] || [ -n "$attach" ]; }; then
-    gh repo view "$rowner/$rname" >/dev/null 2>&1 || die "repo $rowner/$rname does not exist"
-  fi
+if [ "$cmd" != rm ] && { [ "$cmd" != new ] || [ -n "$attach" ]; }; then
+  gh repo view "$repo" >/dev/null 2>&1 || die "repo $repo does not exist"
 fi
 
 # The machine may never have been added; still carry on.
 machine_remove() {
   local id
   id="$(herdr machine list --json | jq -r --arg l "$name" '[.. | objects | select(.label? == $l) | .id][0] // empty')"
-  if [ -n "$id" ]; then run herdr machine remove "$id" || echo "box: herdr machine remove failed, continuing" >&2
+  if [ -n "$id" ]; then herdr machine remove "$id" || echo "box: herdr machine remove failed, continuing" >&2
   else echo "box: no herdr machine labeled $name, continuing" >&2; fi
 }
-
-# Add the delete_repo scope once if gh lacks it; it stays.
 delete_repo() {
-  if $dry || ! gh auth status 2>&1 | grep -q delete_repo; then run gh auth refresh -s delete_repo; fi
-  run gh repo delete "$owner/$name" --yes
+  gh auth status 2>&1 | grep -q delete_repo || gh auth refresh -s delete_repo
+  gh repo delete "$repo" --yes
 }
 
-# Take away what the box could do on GitHub: stop minting for it (App path) or drop the collaborator (classic).
-retire_access() {
-  if $app; then
-    run rm -f "$reg_dir/$name.json" "$state_dir/$name.failed"
-    echo "box: $name is no longer refreshed. Its last token expires within 1 hour; to cut it off sooner, run: box panic" >&2
-  else
-    run gh api -X DELETE "$repo/collaborators/$agent" >/dev/null
-  fi
-}
-
-repo_id=0 # only new knows the id; reset passes accept=0 and never reads it
-# Create the box, connect herdr, clone the repo and open its workspace. $1 = accept the collaborator invite (new only).
+# Create the box, connect herdr, clone the repo, open the pane. $1 = commit to check out, $2 = first line for the pane (optional).
 provision() {
-  local accept="$1"
-  # Machine add inside this step starts the box herdr server.
+  local ref="$1" note="${2:-}"
+  echo "==> Starting the proxy and bridge for $name"
+  jobs_start "$name" "$repo"
   echo "==> Creating box $name"
-  if $app; then run env BOX_AUTH=app "$sandbox" new "$name"; else run "$sandbox" new "$name"; fi
+  "$sandbox" new "$name" "$repo"
   # herdr reaches the box over ssh; fail here with a hint rather than inside machine add.
   local ssh_ok=false
   for _ in $(seq 10); do
-    run ssh -o BatchMode=yes "$name@orb" true && { ssh_ok=true; break; }
+    ssh -o BatchMode=yes "$name@orb" true && { ssh_ok=true; break; }
     sleep 1
   done
   $ssh_ok || die "cannot ssh $name@orb non-interactively; add this to ~/.ssh/config:
@@ -215,146 +217,82 @@ Host orb
   IdentitiesOnly yes
   ForwardAgent no"
   # Before any pane exists: machine add starts the box's herdr server and may restart it, killing panes.
-  # No tty on stdin keeps it non-interactive; a fresh box has herdr installed and no server, so nothing to confirm.
-  run herdr machine add "ssh://$name@orb" --label "$name" --remote-session default </dev/null
-  # App path: the first token goes in before the clone; the refresher keeps it fresh after that.
-  local auth_check='[ -n "${GH_TOKEN:-}" ] || { echo "box: GH_TOKEN missing in the box" >&2; exit 1; }'
-  if $app; then
-    auth_check='[ -s /run/agent/gh-token ] || { echo "box: no App token in the box" >&2; exit 1; }'
-    echo "==> Seeding the first GitHub App token"
-    if $dry; then echo "+ box-mint $name | $sandbox seed $name" >&2; else
-      # A repo created seconds ago may not be visible to the installation yet, so retry.
-      seeded=false
-      for n in 1 2 3; do
-        "$mint" "$name" </dev/null | "$sandbox" seed "$name" && { seeded=true; break; }
-        echo "box: seeding the first token failed (attempt $n/3), retrying" >&2; sleep $((n * 3))
-      done
-      $seeded || die "could not seed the first GitHub App token"
-    fi
-  fi
-  # The invite can lag behind the PUT, so retry the accept.
-  run_in "$sandbox" exec "$name" bash -s <<EOF
+  herdr machine add "ssh://$name@orb" --label "$name" --remote-session default </dev/null
+  # The clone goes through the proxy; a repo created seconds ago may lag, so retry. A dry-run push proves write access.
+  "$sandbox" exec "$name" bash -s <<EOF
 set -euo pipefail
-$auth_check
-if [ "$accept" = 1 ]; then
-  # Invitations left by deleted repos of the same name carry other repo ids: decline them, accept only ours.
-  for _ in \$(seq 30); do
-    invs="\$(gh api user/repository_invitations --paginate)"
-    for stale in \$(jq -r '.[] | select(.repository.full_name == "$owner/$name" and .repository.id != $repo_id) | .id' <<<"\$invs"); do
-      gh api -X DELETE "user/repository_invitations/\$stale" >/dev/null || true
-    done
-    id="\$(jq -r '.[] | select(.repository.id == $repo_id) | .id' <<<"\$invs" | head -n1)"
-    [ -z "\$id" ] || break
-    sleep 2
-  done
-  [ -n "\$id" ] || { echo "box: no invitation to $owner/$name found" >&2; exit 1; }
-  if ! out="\$(gh api -i -X PATCH "user/repository_invitations/\$id" 2>&1)"; then
-    echo "box: accepting the invitation failed: \$(head -n1 <<<"\$out")" >&2
-    echo "\$out" | awk 'f; /^\r?\$/ { f = 1 }' >&2
-    ! grep -qi scope <<<"\$out" || echo "box: agent token needs the repo:invite scope" >&2
-    exit 1
-  fi
-fi
-gh repo clone $rowner/$rname ~/$name
-cd ~/$name
-if [ "$accept" = 1 ]; then
-  # Collaborator access can lag the accept; a dry-run push exercises the same auth as a real one.
-  pushed=false
-  for _ in \$(seq 15); do
-    if err="\$(git push --dry-run origin main 2>&1)"; then pushed=true; break; fi
-    sleep 2
-  done
-  \$pushed || { echo "box: agent cannot push to $owner/$name; last git error:" >&2; echo "\$err" >&2; exit 1; }
-fi
-[ -z "$ref" ] || git checkout "$ref"
-[ ! -e ~/$name/.envrc ] || direnv allow ~/$name # an attached repo may have no .envrc
+bridge=false
+for _ in \$(seq 30); do curl -s -m 3 -o /dev/null http://localhost:8080/__health && { bridge=true; break; }; sleep 1; done
+\$bridge || { echo "box: the bridge to the Mac proxy is not up" >&2; exit 1; }
+cloned=false
+for _ in \$(seq 15); do git clone -q https://github.com/$repo ~/$rname 2>/dev/null && { cloned=true; break; }; sleep 2; done
+\$cloned || { echo "box: cannot clone $repo through the proxy" >&2; exit 1; }
+cd ~/$rname
+pushed=false
+for _ in \$(seq 15); do
+  if err="\$(git push --dry-run origin HEAD:refs/heads/box-access-check 2>&1)"; then pushed=true; break; fi
+  sleep 2
+done
+\$pushed || { echo "box: the agent cannot push to $repo; last git error:" >&2; echo "\$err" >&2; exit 1; }
+[ -z "$ref" ] || git checkout -q "$ref"
+[ ! -e .envrc ] || direnv allow .
 # Pre-accept folder trust so the agent never blocks on a dialog.
-mkdir -p ~/.claude
-[ -s ~/.claude.json ] || echo '{}' > ~/.claude.json
-jq --arg p "\$HOME/$name" '.projects[\$p].hasTrustDialogAccepted = true' ~/.claude.json > ~/.claude.json.tmp && mv ~/.claude.json.tmp ~/.claude.json
+jq --arg p "\$HOME/$rname" '.projects[\$p].hasTrustDialogAccepted = true' ~/.claude.json > ~/.claude.json.tmp && mv ~/.claude.json.tmp ~/.claude.json
 for _ in \$(seq 30); do herdr workspace list >/dev/null 2>&1 && break; sleep 1; done
-herdr workspace create --cwd ~/$name --label $name --no-focus >/dev/null
+ws="\$(herdr workspace create --cwd ~/$rname --label $name --no-focus)"
+pane="\$(jq -r '[.. | objects | .pane_id? // empty][0] // empty' <<<"\$ws")"
+[ -n "\$pane" ] || { echo "box: no pane id in: \$ws" >&2; exit 1; }
+${note:+herdr pane run "\$pane" "echo '$note'" >/dev/null}
+herdr pane run "\$pane" claude >/dev/null
 EOF
 }
 
 case "$cmd" in
-  rm) machine_remove; run "$sandbox" rm "$name"; exit ;;
-  retire)
-    machine_remove
-    run "$sandbox" rm "$name"
-    retire_access
-    exit ;;
-  destroy)
-    ! $attached || die "$name is attached to the existing repo $rowner/$rname, which destroy would delete; use: box retire $name"
-    if ! $dry; then
-      read -r -p "Delete box $name AND repo $owner/$name permanently? [y/N] " ans
-      [ "$ans" = y ] || exit 0
-    fi
-    machine_remove
-    run "$sandbox" rm "$name" || echo "box: no box $name, continuing" >&2
-    retire_access || true
-    delete_repo
+  rm)
+    machine_remove; jobs_stop "$name"; "$sandbox" rm "$name"
+    echo "box $name removed; the repo $repo and its status history are kept"
     exit ;;
   reset)
-    machine_remove
-    run "$sandbox" rm "$name"
-    provision 0
-    echo "box $name reset${ref:+ at $ref}: github.com/$rowner/$rname"
+    [ -n "$to" ] || die "reset needs --to <commit | pr/N | status/N>"
+    case "$to" in
+      pr/[0-9]*) sha="$(gh api "repos/$repo/pulls/${to#pr/}" --jq .head.sha)" ;;
+      status/[0-9]*) sha="$(sed -n "${to#status/}p" "$status_dir/$name.log" | cut -f3)" ;;
+      *) [[ "$to" =~ ^[0-9a-f]{7,40}$ ]] || die "--to must be a commit, pr/N or status/N: $to"; sha="$to" ;;
+    esac
+    [ -n "${sha:-}" ] || die "nothing found for --to $to"
+    sha="$(gh api "repos/$repo/commits/$sha" --jq .sha)" || die "commit $sha is not in $repo"
+    entry="$(awk -F'\t' -v c="$sha" 'index(c, $3) == 1 { l = $1 "  " $2 "  " $4 } END { print l }' "$status_dir/$name.log" 2>/dev/null || true)"
+    [ -z "$entry" ] || echo "Status entry at that commit: $entry"
+    machine_remove; jobs_stop "$name"; "$sandbox" rm "$name" || echo "box: no box $name, continuing" >&2
+    provision "$sha" "Reset to ${sha:0:7}.${entry:+ Last status there: $entry}"
+    echo "box $name reset at ${sha:0:7}: github.com/$repo"
     exit ;;
 esac
 
-# Registry file: the repos this box may get tokens for (read by bin/box-mint), plus which repo is its own. Dir 700, file 600.
-write_registry() {
-  if $dry; then echo "+ write $reg_dir/$name.json repos=[$1] repo=$rowner/$rname attached=$attached (mode 600)" >&2
-  else
-    (umask 077; mkdir -p "$reg_dir"
-     jq -nc --arg r "$1" --arg p "$rowner/$rname" --argjson a "$attached" \
-       '{repos: ($r | split(",") | map(select(. != "")) | unique), repo: $p, attached: $a}' >"$reg_dir/$name.json")
-  fi
-}
-
-# --- new --repo: attach a box to an existing repo. The repo is never created, changed or deleted here. ---
-if [ -n "$attach" ]; then
-  write_registry "$rowner/$rname"
-  attach_cleanup() {
-    local rc=$?
-    trap - EXIT
-    if ! $dry && [ $rc -ne 0 ] && [ "${BOX_KEEP:-}" != 1 ]; then
-      echo "box: new failed, rolling back box $name (the repo $rowner/$rname is untouched)" >&2
-      machine_remove || true; "$sandbox" rm "$name" || true; rm -f "$reg_dir/$name.json"
-    fi
-    exit $rc
-  }
-  trap attach_cleanup EXIT
-  provision 0
-  echo "box $name ready on existing repo: github.com/$rowner/$rname"
-  exit
-fi
-
-# --- new, 1. Mac side: repo contents ---
-dir="$(mktemp -d "${TMPDIR:-/tmp}/box.XXXXXX")"
-armed=false
-# Once the repo exists, any failure removes the box, the herdr entry and the repo so the name can be rerun.
+# --- new ---
+dir="" armed=false
 cleanup() {
   local rc=$?
   trap - EXIT
   if $armed && [ $rc -ne 0 ] && [ "${BOX_KEEP:-}" = 1 ]; then
-    echo "box: new failed; $name and $owner/$name kept for debugging" >&2
+    echo "box: new failed; $name kept for debugging" >&2
   elif $armed && [ $rc -ne 0 ]; then
     echo "box: new failed, rolling back $name" >&2
-    armed=false
-    machine_remove || true
-    "$sandbox" rm "$name" || true
-    delete_repo || echo "box: could not delete $owner/$name; run: box destroy $name" >&2
+    machine_remove || true; jobs_stop "$name"; "$sandbox" rm "$name" || true
+    ! $attached || echo "box: the repo $repo is untouched" >&2
+    rm -f "$reg_dir/$name.json"
+    $attached || delete_repo || echo "box: could not delete $repo; delete it by hand" >&2
   fi
-  $dry || rm -rf "$dir"
+  [ -z "$dir" ] || rm -rf "$dir"
   exit $rc
 }
 trap cleanup EXIT
-cd "$dir"
-git init -q -b main
 
-cat >flake.nix <<'EOF'
+if ! $attached; then
+  dir="$(mktemp -d "${TMPDIR:-/tmp}/box.XXXXXX")"
+  cd "$dir"
+  git init -q -b main
+  cat >flake.nix <<'EOF'
 {
   description = "dev shell";
 
@@ -377,21 +315,17 @@ cat >flake.nix <<'EOF'
     };
 }
 EOF
+  echo "use flake" >.envrc
+  printf '.direnv/\nresult\n.worktrees/\n' >.gitignore
+  command -v nix >/dev/null && nix --extra-experimental-features "nix-command flakes" flake lock 2>/dev/null || true
+  git add -A
+  git commit -q -m "Initial commit"
 
-echo "use flake" >.envrc
-printf '.direnv/\nresult\n.worktrees/\n' >.gitignore
-command -v nix >/dev/null && nix --extra-experimental-features "nix-command flakes" flake lock 2>/dev/null || true
-git add -A
-git commit -q -m "Initial commit"
-
-echo "==> Creating GitHub repo $owner/$name"
-run gh repo create "$owner/$name" --public --source . --remote origin
-armed=true
-# Same-name invitations from deleted repos exist, so the box accepts by numeric id.
-repo_id=0
-$dry || repo_id="$(gh api "$repo" --jq .id)"
-push=(git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push -q origin main)
-if $dry; then run "${push[@]}"; else
+  echo "==> Creating GitHub repo $repo"
+  gh repo create "$repo" --public --source . --remote origin
+  armed=true
+  repo_id="$(gh api "repos/$repo" --jq .id)"
+  push=(git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push -q origin main)
   log="$(mktemp "${TMPDIR:-/tmp}/box-push.XXXXXX")"
   for attempt in 1 2 3; do
     "${push[@]}" 2>"$log" && break
@@ -403,14 +337,14 @@ if $dry; then run "${push[@]}"; else
     sleep 5
   done
   rm -f "$log"
-fi
-run gh api -X PATCH "$repo" -F delete_branch_on_merge=true >/dev/null
-run_in gh api -X POST "$repo/rulesets" --input - >/dev/null <<'EOF'
+  gh api -X PATCH "repos/$repo" -F delete_branch_on_merge=true >/dev/null
+  # No bypass: only a reviewer other than the bot can merge, so only the owner merges.
+  gh api -X POST "repos/$repo/rulesets" --input - >/dev/null <<'EOF'
 {
   "name": "protect-main",
   "target": "branch",
   "enforcement": "active",
-  "bypass_actors": [{ "actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "pull_request" }],
+  "bypass_actors": [],
   "conditions": { "ref_name": { "include": ["~DEFAULT_BRANCH"], "exclude": [] } },
   "rules": [
     {
@@ -428,15 +362,26 @@ run_in gh api -X POST "$repo/rulesets" --input - >/dev/null <<'EOF'
   ]
 }
 EOF
-if $app; then
-  # The box's own repo is always included, or it could not clone or push; --repos adds extras.
-  write_registry "$owner/$name,$repos"
-else
-  run gh api -X PUT "$repo/collaborators/$agent" -f permission=push >/dev/null
+  gh api -X PATCH "repos/$repo" --input - >/dev/null <<'EOF'
+{ "security_and_analysis": { "secret_scanning": { "status": "enabled" }, "secret_scanning_push_protection": { "status": "enabled" } } }
+EOF
+  # Invite the bot and accept on this Mac with its Keychain token, so the box never needs a real GitHub token.
+  gh api -X PUT "repos/$repo/collaborators/$AGENT" -f permission=push >/dev/null
+  tok="$(security find-generic-password -s agentbox-github -w | tr -d '[:space:]')"
+  [[ ! "$tok" =~ ^([0-9a-f]{2})+$ ]] || tok="$(xxd -r -p <<<"$tok")"
+  accepted=false
+  for _ in $(seq 30); do
+    id="$(GH_TOKEN="$tok" gh api user/repository_invitations --jq ".[] | select(.repository.id == $repo_id) | .id" | head -n1)"
+    [ -z "$id" ] || { GH_TOKEN="$tok" gh api -X PATCH "user/repository_invitations/$id" >/dev/null && accepted=true; break; }
+    sleep 2
+  done
+  unset tok
+  $accepted || die "the bot $AGENT never saw the invitation to $repo"
+  cd "$root"
 fi
+armed=true
+mkdir -p "$reg_dir"
+jq -nc --arg p "$repo" --argjson a "$attached" '{repo: $p, attached: $a}' >"$reg_dir/$name.json"
 
-# --- new, 2. Box side ---
-if $app; then provision 0; else provision 1; fi
-armed=false
-
-echo "box $name ready: github.com/$owner/$name"
+provision ""
+echo "box $name ready: github.com/$repo (type the first task in the herdr pane)"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # setup.sh - provision a fresh Debian OrbStack machine as an agent box.
 # Run as root with SETUP_USER set (the sandbox script does this). No secrets here:
-# `sandbox new` injects the agent, Claude tokens and git identity per box.
+# `sandbox new` adds the firewall, fake tokens, bridge and git identity per box.
 set -euo pipefail
 : "${SETUP_USER:?}"
 home="/home/$SETUP_USER"
@@ -24,8 +24,7 @@ echo 'source "$HOME/.nix-profile/share/nix-direnv/direnvrc"' > "$home/.config/di
 touch "$home/.bashrc"
 {
   echo 'export PATH="$HOME/.nix-profile/bin:/nix/var/nix/profiles/default/bin:$HOME/.local/bin:$PATH"'
-  echo '[ -f ~/.gh-token-env ] && . ~/.gh-token-env'
-  echo '[ -f ~/.claude-token-env ] && . ~/.claude-token-env'
+  echo '[ -f ~/.box-env ] && . ~/.box-env'
   cat "$home/.bashrc"
   echo 'eval "$(direnv hook bash)"'
 } > "$home/.bashrc.new"
@@ -45,26 +44,7 @@ chown -R "$SETUP_USER:$SETUP_USER" "$home/.claude" "$home/.claude.json"
 # Needs ~/.claude to exist, so it runs after the Claude Code install.
 as_user 'herdr integration install claude'
 
-# --- Egress firewall: allow internet, block LAN ---
-# 192.168.138.0/23 and 198.18.0.0/15 are OrbStack's internal ranges. They are
-# rejected here like any LAN; `sandbox new` adds back only each box's own
-# gateway and DNS, so boxes cannot reach each other.
-cat > /etc/nftables.conf << 'EOF2'
-#!/usr/sbin/nft -f
-flush ruleset
-table inet sandbox {
-  chain output {
-    type filter hook output priority 0; policy accept;
-    oifname "lo" accept
-    ct state established,related accept
-    meta l4proto ipv6-icmp accept
-    ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 198.18.0.0/15,
-               169.254.0.0/16, 100.64.0.0/10 } counter reject
-    ip6 daddr { fc00::/7, fe80::/10 } counter reject
-  }
-}
-EOF2
-systemctl enable --now nftables
+# The egress firewall is box/firewall.nft, installed per box by `sandbox new` (nftables is installed above).
 
 apt-get clean
 echo "box provisioned"
