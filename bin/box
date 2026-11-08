@@ -15,7 +15,7 @@ uid="$(id -u)"
 
 usage() {
   cat <<'EOF'
-Usage: box new NAME [--repo owner/name]
+Usage: box new NAME [--repo owner/name | --fork owner/name]
        box status [NAME] [--history]
        box reset NAME --to <commit | pr/N | status/N>
        box rm NAME
@@ -23,7 +23,7 @@ Usage: box new NAME [--repo owner/name]
        box base
        box ls
 
-new      create the repo (or attach with --repo), lock main, make the box, start its proxy and bridge, open the herdr pane
+new      create the repo (or fork one with --fork, or attach with --repo), lock main, make the box, start its proxy and bridge, open the herdr pane
 status   one row per box from its status log; --history shows the full timeline (status/N numbers for reset)
 reset    delete the box and rebuild it at that commit, PR head or status entry
 rm       delete the box and its proxy and bridge; the repo and status history stay
@@ -146,10 +146,11 @@ fi
 
 name="${1:?usage: box $cmd NAME}"; shift
 [[ "$name" =~ ^[a-z][a-z0-9-]*$ ]] || die "NAME must be lowercase letters, digits, dashes (it is also the ssh user): $name"
-attach="" to=""
+attach="" fork="" to=""
 while [ $# -gt 0 ]; do
   case "$cmd:$1" in
     new:--repo) attach="${2:?--repo needs owner/name}"; shift 2 ;;
+    new:--fork) fork="${2:?--fork needs owner/name}"; [[ "$fork" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "invalid --fork (want owner/name): $fork"; shift 2 ;;
     reset:--to) to="${2:?--to needs a value}"; shift 2 ;;
     *) usage >&2; die "unknown argument: $1" ;;
   esac
@@ -160,6 +161,7 @@ OWNER="" AGENT=""
 # shellcheck disable=SC1090
 . "$config"
 [ -n "$OWNER" ] && [ -n "$AGENT" ] || die "$config must set OWNER and AGENT"
+[ -z "$fork" ] || [ -z "$attach" ] || die "use --repo or --fork, not both"
 rowner="$OWNER" rname="$name" attached=false
 if [ -n "$attach" ]; then
   [[ "$attach" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "invalid --repo (want owner/name): $attach"
@@ -194,6 +196,55 @@ machine_remove() {
 delete_repo() {
   gh auth status 2>&1 | grep -q delete_repo || gh auth refresh -s delete_repo
   gh repo delete "$repo" --yes
+}
+
+# Lock main, turn on secret scanning and give the bot write access. Safe to run on a repo that already has some of it.
+protect_repo() {
+  local repo_id tok id accepted
+  repo_id="$(gh api "repos/$repo" --jq .id)"
+  gh api -X PATCH "repos/$repo" -F delete_branch_on_merge=true >/dev/null
+  # No bypass: only a reviewer other than the bot can merge, so only the owner merges.
+  if ! gh api "repos/$repo/rulesets" --jq '.[].name' | grep -qx protect-main; then
+  gh api -X POST "repos/$repo/rulesets" --input - >/dev/null <<'EOF'
+{
+  "name": "protect-main",
+  "target": "branch",
+  "enforcement": "active",
+  "bypass_actors": [],
+  "conditions": { "ref_name": { "include": ["~DEFAULT_BRANCH"], "exclude": [] } },
+  "rules": [
+    {
+      "type": "pull_request",
+      "parameters": {
+        "required_approving_review_count": 1,
+        "dismiss_stale_reviews_on_push": false,
+        "require_code_owner_review": false,
+        "require_last_push_approval": false,
+        "required_review_thread_resolution": false
+      }
+    },
+    { "type": "non_fast_forward" },
+    { "type": "deletion" }
+  ]
+}
+EOF
+  fi
+  gh api -X PATCH "repos/$repo" --input - >/dev/null <<'EOF'
+{ "security_and_analysis": { "secret_scanning": { "status": "enabled" }, "secret_scanning_push_protection": { "status": "enabled" } } }
+EOF
+  # Invite the bot and accept on this Mac with its Keychain token, so the box never needs a real GitHub token.
+  gh api "repos/$repo/collaborators/$AGENT" --silent 2>/dev/null && return 0
+  gh api -X PUT "repos/$repo/collaborators/$AGENT" -f permission=push >/dev/null
+  tok="$(security find-generic-password -s agentbox-github -w | tr -d '[:space:]')"
+  [[ ! "$tok" =~ ^([0-9a-f]{2})+$ ]] || tok="$(xxd -r -p <<<"$tok")"
+  accepted=false
+  for _ in $(seq 30); do
+    id="$(GH_TOKEN="$tok" gh api user/repository_invitations --jq ".[] | select(.repository.id == $repo_id) | .id" | head -n1)"
+    [ -z "$id" ] || { GH_TOKEN="$tok" gh api -X PATCH "user/repository_invitations/$id" >/dev/null && accepted=true; break; }
+    sleep 2
+  done
+  unset tok
+  $accepted || die "the bot $AGENT never saw the invitation to $repo"
 }
 
 # Create the box, connect herdr, clone the repo, open the pane. $1 = commit to check out, $2 = first line for the pane (optional).
@@ -235,7 +286,7 @@ for _ in \$(seq 15); do
   sleep 2
 done
 \$pushed || { echo "box: the agent cannot push to $repo; last git error:" >&2; echo "\$err" >&2; exit 1; }
-[ -z "$ref" ] || git checkout -q "$ref"
+[ -z "$ref" ] || git checkout -q "$ref" 2>/dev/null || { git fetch -q origin "$ref" && git checkout -q FETCH_HEAD; }
 [ ! -e .envrc ] || direnv allow .
 # Pre-accept folder trust so the agent never blocks on a dialog.
 jq --arg p "\$HOME/$rname" '.projects[\$p].hasTrustDialogAccepted = true' ~/.claude.json > ~/.claude.json.tmp && mv ~/.claude.json.tmp ~/.claude.json
@@ -289,7 +340,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if ! $attached; then
+if ! $attached && [ -z "$fork" ]; then
   dir="$(mktemp -d "${TMPDIR:-/tmp}/box.XXXXXX")"
   cd "$dir"
   git init -q -b main
@@ -338,49 +389,16 @@ EOF
     sleep 5
   done
   rm -f "$log"
-  gh api -X PATCH "repos/$repo" -F delete_branch_on_merge=true >/dev/null
-  # No bypass: only a reviewer other than the bot can merge, so only the owner merges.
-  gh api -X POST "repos/$repo/rulesets" --input - >/dev/null <<'EOF'
-{
-  "name": "protect-main",
-  "target": "branch",
-  "enforcement": "active",
-  "bypass_actors": [],
-  "conditions": { "ref_name": { "include": ["~DEFAULT_BRANCH"], "exclude": [] } },
-  "rules": [
-    {
-      "type": "pull_request",
-      "parameters": {
-        "required_approving_review_count": 1,
-        "dismiss_stale_reviews_on_push": false,
-        "require_code_owner_review": false,
-        "require_last_push_approval": false,
-        "required_review_thread_resolution": false
-      }
-    },
-    { "type": "non_fast_forward" },
-    { "type": "deletion" }
-  ]
-}
-EOF
-  gh api -X PATCH "repos/$repo" --input - >/dev/null <<'EOF'
-{ "security_and_analysis": { "secret_scanning": { "status": "enabled" }, "secret_scanning_push_protection": { "status": "enabled" } } }
-EOF
-  # Invite the bot and accept on this Mac with its Keychain token, so the box never needs a real GitHub token.
-  gh api -X PUT "repos/$repo/collaborators/$AGENT" -f permission=push >/dev/null
-  tok="$(security find-generic-password -s agentbox-github -w | tr -d '[:space:]')"
-  [[ ! "$tok" =~ ^([0-9a-f]{2})+$ ]] || tok="$(xxd -r -p <<<"$tok")"
-  accepted=false
-  for _ in $(seq 30); do
-    id="$(GH_TOKEN="$tok" gh api user/repository_invitations --jq ".[] | select(.repository.id == $repo_id) | .id" | head -n1)"
-    [ -z "$id" ] || { GH_TOKEN="$tok" gh api -X PATCH "user/repository_invitations/$id" >/dev/null && accepted=true; break; }
-    sleep 2
-  done
-  unset tok
-  $accepted || die "the bot $AGENT never saw the invitation to $repo"
   cd "$root"
 fi
+if [ -n "$fork" ]; then
+  echo "==> Forking $fork to $repo"
+  gh repo fork "$fork" --fork-name "$name" --clone=false
+  armed=true
+  for _ in $(seq 30); do gh repo view "$repo" >/dev/null 2>&1 && break; sleep 2; done
+fi
 armed=true
+protect_repo
 mkdir -p "$reg_dir"
 jq -nc --arg p "$repo" --argjson a "$attached" '{repo: $p, attached: $a}' >"$reg_dir/$name.json"
 

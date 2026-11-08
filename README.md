@@ -18,7 +18,7 @@ status log copy (append-only)  <-- orb run cat -- ~/.box/status.log (agent appen
 
 | Command | Does |
 |---|---|
-| `box new NAME [--repo owner/name]` | Create (or attach) the repo, lock main, make the box, start its proxy and bridge, open the herdr pane |
+| `box new NAME [--repo owner/name \| --fork owner/name]` | Create the repo, fork one into your account, or attach one of yours; lock main, make the box, start its proxy and bridge, open the herdr pane |
 | `box status [NAME] [--history]` | One row per box: state, last task, commit, PR link, time. `--history` numbers every entry (`status/N`) |
 | `box reset NAME --to <commit\|pr/N\|status/N>` | Delete the box and rebuild it at that commit. Packages come back through `flake.lock` |
 | `box rm NAME` | Delete the box, its proxy and bridge. The repo and status history stay |
@@ -51,7 +51,7 @@ status log copy (append-only)  <-- orb run cat -- ~/.box/status.log (agent appen
 - An injected agent could misuse your home internet address over 80/443 (for example hammering a website).
 - "If anything is unclear or blocked, stop and ask" and the 7-day package rule in the box `CLAUDE.md` are requests, not controls.
 - Apple Silicon Macs only (the box bridge is built for arm64).
-- A repo attached with `--repo` gets no ruleset or bot invite from `box new`; set up `protect-main` and the bot's write access by hand.
+- `--fork` and `--repo` apply the same `protect-main` ruleset, push protection and bot invite as a new repo (skipped if already there). Forks of other people's repos start from their default branch and their PRs target your fork, not upstream.
 - Pro usage is the real cap on parallel boxes.
 - With the Mac asleep or the proxy down, Claude shows its own error and stops after about 3 minutes.
 - Claude shows "Remote managed settings failed to load (401)" in every pane: its policy call goes direct with a fake token. Harmless.
