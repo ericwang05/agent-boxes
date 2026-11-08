@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>dev.agent-boxes.r4a-bridge</string>
+<key>ProgramArguments</key><array>
+<string>/Users/ericwang/agent-boxes-poc/round4/agentbox-bridge</string><string>mac-side</string>
+<string>-box</string><string>r4a</string><string>-dial</string><string>unix:/Users/ericwang/agent-boxes-poc/round4/run/r4a.sock</string>
+<string>-max-streams</string><string>64</string><string>-rate</string><string>100</string>
+<string>-idle</string><string>2m</string><string>-life</string><string>0</string>
+</array>
+<key>EnvironmentVariables</key><dict>
+<key>PATH</key><string>/opt/homebrew/bin:/usr/bin:/bin</string>
+<key>BRIDGE_DIR</key><string>/Users/ericwang/agent-boxes-poc/round4</string>
+</dict>
+<key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>1</integer>
+<key>StandardErrorPath</key><string>/Users/ericwang/agent-boxes-poc/round4/r4a.out</string>
+<key>StandardOutPath</key><string>/Users/ericwang/agent-boxes-poc/round4/r4a.out</string>
+</dict></plist>
