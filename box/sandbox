@@ -95,7 +95,10 @@ git config --global "url.http://localhost:8080/gh/$REPO.insteadOf" "https://gith
 git config --global "credential.http://localhost:8080.helper" '!f() { echo username=x; echo password=$GH_TOKEN; }; f'
 umask 077
 printf 'export GH_TOKEN=FAKE-GH-%s CLAUDE_CODE_OAUTH_TOKEN=FAKE-CLAUDE-%s\n' "$BOX" "$BOX" > ~/.box-env
-grep -q box-env ~/.bashrc || { echo '[ -f ~/.box-env ] && . ~/.box-env'; cat ~/.bashrc; } > ~/.bashrc.new && mv ~/.bashrc.new ~/.bashrc
+if ! grep -q box-env ~/.bashrc; then
+  { echo '[ -f ~/.box-env ] && . ~/.box-env'; cat ~/.bashrc; } > ~/.bashrc.new
+  mv ~/.bashrc.new ~/.bashrc
+fi
 [ -s ~/.claude.json ] || echo '{}' > ~/.claude.json
 jq '.hasCompletedOnboarding = true | .hasSeenAutoDefaultNudge = true' ~/.claude.json > ~/.claude.json.tmp && mv ~/.claude.json.tmp ~/.claude.json
 USER

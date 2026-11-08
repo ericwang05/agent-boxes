@@ -172,8 +172,9 @@ fi
 repo="$rowner/$rname"
 for tool in gh git herdr jq go; do command -v "$tool" >/dev/null || die "$tool not found"; done
 [ -x "$sandbox" ] || die "box layer not found or not executable: $sandbox"
-[ "$(gh api user --jq .login 2>/dev/null)" = "$OWNER" ] || die "gh is not logged in as $OWNER; run: gh auth login"
-for k in agentbox-claude agentbox-github; do security find-generic-password -s "$k" >/dev/null 2>&1 || die "Keychain has no '$k' entry"; done
+# rm must work with no credentials, so it skips these two checks.
+[ "$cmd" = rm ] || [ "$(gh api user --jq .login 2>/dev/null)" = "$OWNER" ] || die "gh is not logged in as $OWNER; run: gh auth login"
+[ "$cmd" = rm ] || for k in agentbox-claude agentbox-github; do security find-generic-password -s "$k" >/dev/null 2>&1 || die "Keychain has no '$k' entry"; done
 if [ "$cmd" = new ]; then
   [ -n "$attach" ] || ! gh repo view "$repo" >/dev/null 2>&1 || die "repo $repo already exists"
   # A failed new removes the box named $name, so never start over an existing one.

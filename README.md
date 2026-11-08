@@ -50,13 +50,15 @@ status log copy (append-only)  <-- orb run cat -- ~/.box/status.log (agent appen
 - With 80/443 open the agent can still send repo code anywhere. The design protects **tokens, not data**. The repos are public anyway.
 - An injected agent could misuse your home internet address over 80/443 (for example hammering a website).
 - "If anything is unclear or blocked, stop and ask" and the 7-day package rule in the box `CLAUDE.md` are requests, not controls.
+- Apple Silicon Macs only (the box bridge is built for arm64).
+- A repo attached with `--repo` gets no ruleset or bot invite from `box new`; set up `protect-main` and the bot's write access by hand.
 - Pro usage is the real cap on parallel boxes.
 - With the Mac asleep or the proxy down, Claude shows its own error and stops after about 3 minutes.
 - Claude shows "Remote managed settings failed to load (401)" in every pane: its policy call goes direct with a fake token. Harmless.
 
 ## Stretch goals (not built)
 
-DNS tunnelling, a marketplace allow-list for plugins, fine-grained GitHub tokens in an org, a `gh pr create` wrapper, hooks that write status lines, Mac notifications, rotating fake tokens.
+DNS tunnelling, narrowing the DHCP rule (`udp dport 67`) to the box gateway, a size cap on proxy request bodies, a marketplace allow-list for plugins, fine-grained GitHub tokens in an org, a `gh pr create` wrapper, hooks that write status lines, Mac notifications, rotating fake tokens.
 
 ## Layout
 
