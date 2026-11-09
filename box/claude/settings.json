@@ -1,8 +1,4 @@
 {
-  "permissions": {
-    "defaultMode": "bypassPermissions"
-  },
-  "skipDangerousModePermissionPrompt": true,
   "enabledPlugins": {
     "pstack@cursor-plugins": true,
     "eli5@claude-community": true,
@@ -34,5 +30,6 @@
         "repo": "DietrichGebert/ponytail"
       }
     }
-  }
+  },
+  "theme": "dark"
 }

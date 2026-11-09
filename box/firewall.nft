@@ -1,0 +1,18 @@
+#!/usr/sbin/nft -f
+# Box egress: loopback, replies, DHCP renewal, then the Mac, the home LAN, other boxes, private ranges, multicast and IPv6 are
+# rejected. Only DNS (53) and web (80, 443) go out; everything else is rejected. Root-owned, loaded by nftables.service at boot.
+flush ruleset
+table inet sandbox {
+  chain output {
+    type filter hook output priority 0; policy drop;
+    oifname "lo" accept
+    ct state established,related accept
+    udp dport 67 accept comment "dhcp renewal"
+    ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 198.18.0.0/15,
+               169.254.0.0/16, 100.64.0.0/10, 224.0.0.0/4 } counter reject
+    ip6 daddr ::/0 counter reject comment "no ipv6 egress, clients fall back to ipv4"
+    udp dport 53 accept
+    tcp dport { 53, 80, 443 } accept
+    counter reject
+  }
+}
