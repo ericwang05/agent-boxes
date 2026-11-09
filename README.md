@@ -63,7 +63,7 @@ Add or replace a token later with `box token NAME` (`claude` and `github` are th
 - **Agent is stuck or asked something:** answer in its pane. "dangerous rm" questions in bypass mode are normal.
 - **Suspect a box:** `box panic`, then `box rm NAME`. To cut GitHub access, revoke the bot's classic token and re-save it in Keychain (`agentbox-github`).
 - **`box new` failed:** it rolls back the box, jobs and a repo it created. `BOX_KEEP=1 box new ...` keeps them for debugging. Proxy and bridge logs are in `~/.config/agent-boxes/logs/`.
-- **Claude can't connect:** is the Mac awake and the bridge up? `BRIDGE_DIR=~/.config/agent-boxes/logs build/agentbox-bridge status`.
+- **Claude can't connect:** is the Mac awake and the bridge up? From this repository's root, run `BRIDGE_DIR=~/.config/agent-boxes/logs build/agentbox-bridge status`.
 - **Proxy blocks something:** one JSON line per block in `logs/NAME.proxy.log`; `rule` is `not-own-repo`, `rest-not-allowed`, `bad-token` or `gh-api-not-repos`.
 
 ## Changing the setup
