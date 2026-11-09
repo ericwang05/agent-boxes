@@ -15,7 +15,9 @@ uid="$(id -u)"
 
 usage() {
   cat <<'EOF'
-Usage: box new NAME [--repo owner/name | --fork owner/name]
+Usage: box setup
+       box token NAME
+       box new NAME [--repo owner/name | --fork owner/name]
        box status [NAME] [--history]
        box reset NAME --to <commit | pr/N | status/N>
        box rm NAME
@@ -23,6 +25,8 @@ Usage: box new NAME [--repo owner/name | --fork owner/name]
        box base
        box ls
 
+setup    one-time: check tools, write config, add tokens to the Keychain, ssh entry, build box-base
+token    add or replace a real token NAME in the Keychain (claude: from `claude setup-token`; github: the bot's classic token)
 new      create the repo (or fork one with --fork, or attach with --repo), lock main, make the box, start its proxy and bridge, open the herdr pane
 status   one row per box from its status log; --history shows the full timeline (status/N numbers for reset)
 reset    delete the box and rebuild it at that commit, PR head or status entry
@@ -89,6 +93,36 @@ case "$cmd" in
       orb stop "$m" </dev/null || true
     done < <(orb list | awk '$2 == "running" && $1 != "box-base" { print $1 }')
     echo "Every box, bridge and proxy is stopped. Bring a box back with: box reset NAME --to <commit>"
+    exit ;;
+  token)
+    [[ "${1:-}" =~ ^[a-z][a-z0-9-]*$ ]] || die "usage: box token NAME   (lowercase; claude and github are the built-in ones)"
+    echo "Paste the $1 token (input is hidden, then repeated once by the Keychain):"
+    security add-generic-password -U -a "$USER" -s "agentbox-$1" -w
+    echo "Saved as Keychain item agentbox-$1. Running boxes pick it up on their next request."
+    exit ;;
+  setup)
+    for t in gh git herdr jq go orb; do command -v "$t" >/dev/null || die "$t not found (brew install go jq gh; OrbStack and herdr from their sites)"; done
+    gh auth status >/dev/null 2>&1 || die "run: gh auth login   (as the repo owner)"
+    mkdir -p "$cfg"
+    if [ ! -r "$config" ]; then
+      read -rp "Your GitHub login [$(gh api user --jq .login)]: " o; o="${o:-$(gh api user --jq .login)}"
+      read -rp "The bot's GitHub login (the account the agent pushes as): " a
+      read -rp "Git name [$(git config user.name)]: " n; n="${n:-$(git config user.name)}"
+      read -rp "Git email [$(git config user.email)]: " e; e="${e:-$(git config user.email)}"
+      [ -n "$o" ] && [ -n "$a" ] || die "OWNER and the bot login are required"
+      printf 'OWNER=%s\nAGENT=%s\nGIT_NAME=%q\nGIT_EMAIL=%s\n' "$o" "$a" "$n" "$e" >"$config"
+      echo "wrote $config"
+    fi
+    for k in claude github; do
+      security find-generic-password -s "agentbox-$k" >/dev/null 2>&1 || "$0" token "$k"
+    done
+    if ! grep -qs '^Host orb$' ~/.ssh/config; then
+      mkdir -p ~/.ssh
+      printf '\nHost orb\n  HostName 127.0.0.1\n  Port 32222\n  User default\n  IdentityFile ~/.orbstack/ssh/id_ed25519\n  IdentitiesOnly yes\n  ForwardAgent no\n' >>~/.ssh/config
+      echo "added Host orb to ~/.ssh/config"
+    fi
+    orb list 2>/dev/null | awk '$1 == "box-base" { f=1 } END { exit !f }' || "$0" base
+    echo "Setup done. Make a box: box new myapp"
     exit ;;
   base)
     [ -s "$claude_dir/settings.json" ] || die "missing $claude_dir/settings.json"
