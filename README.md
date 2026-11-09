@@ -58,6 +58,20 @@ Add or replace a token later with `box token NAME` (`claude` and `github` are th
 - With the Mac asleep or the proxy down, Claude shows its own error and stops after about 3 minutes.
 - Claude shows "Remote managed settings failed to load (401)" in every pane: its policy call goes direct with a fake token. Harmless.
 
+## When something goes wrong
+
+- **Agent is stuck or asked something:** answer in its pane. "dangerous rm" questions in bypass mode are normal.
+- **Suspect a box:** `box panic`, then `box rm NAME`. To cut GitHub access, revoke the bot's classic token and re-save it in Keychain (`agentbox-github`).
+- **`box new` failed:** it rolls back the box, jobs and a repo it created. `BOX_KEEP=1 box new ...` keeps them for debugging. Proxy and bridge logs are in `~/.config/agent-boxes/logs/`.
+- **Claude can't connect:** is the Mac awake and the bridge up? From this repository's root, run `BRIDGE_DIR=~/.config/agent-boxes/logs build/agentbox-bridge status`.
+- **Proxy blocks something:** one JSON line per block in `logs/NAME.proxy.log`; `rule` is `not-own-repo`, `rest-not-allowed`, `bad-token` or `gh-api-not-repos`.
+
+## Changing the setup
+
+- **Plugins or Claude settings:** edit `box/claude/`, run `box base`; new boxes pick it up. Root-owned settings: `box/managed-settings.json`.
+- **Firewall:** edit `box/firewall.nft`. If a real tool needs another port, add that port; don't remove the rule.
+- **Check isolation by hand:** from a box, `curl -m 3 http://192.168.1.1` and `curl -m 3 http://host.orb.internal` must fail, `curl -m 5 https://github.com` must work, `sudo -n true` must fail (`orb -m NAME <cmd>`).
+
 ## Stretch goals (not built)
 
 DNS tunnelling, narrowing the DHCP rule (`udp dport 67`) to the box gateway, a size cap on proxy request bodies, a marketplace allow-list for plugins, fine-grained GitHub tokens in an org, a `gh pr create` wrapper, hooks that write status lines, Mac notifications, rotating fake tokens.
@@ -68,7 +82,7 @@ DNS tunnelling, narrowing the DHCP rule (`udp dport 67`) to the box gateway, a s
 - `proxy/proxy.py` the per-box proxy (Python stdlib, one file). `bridge/` the Go bridge (frozen; built into `build/` by `box base`).
 - Mac state in `~/.config/agent-boxes/`: `config`, `box-repos/` (box to repo), `run/` (sockets, mode 700), `logs/` (JSON lines from the proxy; no header values), `status/` (append-only copies of each box's status log).
 - launchd jobs `dev.agent-boxes.<box>-proxy` and `-bridge` in `~/Library/LaunchAgents`, written by `box new`, removed by `box rm` and `box panic`.
-- `MVP-HANDOFF.md` records the design decisions. The earlier GitHub App flow is on branch `app-token`.
+- The earlier GitHub App flow is on branch `app-token`; the original design notes are in git history (`MVP-HANDOFF.md`, `PLAYBOOK.md`).
 
 ## Rules to keep
 
