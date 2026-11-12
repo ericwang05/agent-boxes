@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 560" width="640" height="560" role="img" aria-label="Mac on the left holds the proxy, real tokens and the Mac-side bridge. The box on the right holds Claude Code with fake tokens and the box-side bridge. One yamux pipe over orb run joins the bridges. The box firewall allows only ports 53, 80 and 443 out."><style>
+text{font-family:Helvetica,Arial,sans-serif;font-weight:600;fill:#14232e}
+.d{font-weight:800}.m{fill:#4d6270}
+.macbg{fill:#d9e8fb}.boxbg{fill:#daf0df}.tube{fill:#bccad5}
+.paper{fill:#fff;stroke:#14232e;stroke-width:2.5}
+.ink{stroke:#14232e;fill:none;stroke-width:3;stroke-linecap:round;stroke-linejoin:round}
+.dash{stroke:#c8322d;stroke-dasharray:9 7;fill:none;stroke-width:3}
+.key{fill:#f26b21}.keyl{stroke:#f26b21;fill:none;stroke-width:4;stroke-linecap:round}
+.badge{fill:#14232e}
+</style><rect width="640" height="560" fill="#eef3f6"/>
+      <!-- MAC -->
+      <rect class="macbg" x="6" y="12" width="250" height="458" rx="18"/>
+      <text class="d" x="131" y="44" text-anchor="middle" font-size="22" style="fill:#1d4f91">YOUR MAC</text>
+
+      <rect class="paper" x="22" y="62" width="218" height="62" rx="12"/>
+      <text x="131" y="90" text-anchor="middle" font-size="18">box CLI + herdr</text>
+      <text class="m" x="131" y="111" text-anchor="middle" font-size="15">starts it all, one pane per box</text>
+
+      <rect class="paper" x="22" y="146" width="218" height="96" rx="12"/>
+      <text x="131" y="174" text-anchor="middle" font-size="19">proxy.py</text>
+      <text class="m" x="131" y="195" text-anchor="middle" font-size="15">one per box</text>
+      <circle class="key" cx="44" cy="214" r="9"/><path class="keyl" d="M53 214h18"/>
+      <text x="82" y="219" font-size="16">real API tokens</text>
+      <text class="m" x="82" y="236" font-size="13">(Keychain)</text>
+
+      <path class="ink" d="M131 282V242"/><path class="ink" d="M121 252l10-10 10 10"/>
+      <text class="m" x="142" y="268" font-size="15">unix socket</text>
+
+      <rect class="paper" x="22" y="282" width="218" height="62" rx="12"/>
+      <text x="131" y="310" text-anchor="middle" font-size="19">Go bridge</text>
+      <text class="m" x="131" y="331" text-anchor="middle" font-size="15">Mac side</text>
+
+      <rect class="paper" x="22" y="394" width="218" height="62" rx="12"/>
+      <text x="131" y="422" text-anchor="middle" font-size="18">status log copy</text>
+      <text class="m" x="131" y="443" text-anchor="middle" font-size="15">append-only</text>
+
+      <!-- BOX -->
+      <rect class="boxbg" x="384" y="12" width="250" height="458" rx="18"/>
+      <text class="d" x="509" y="44" text-anchor="middle" font-size="22" style="fill:#1d6b3a">THE BOX</text>
+
+      <rect class="paper" x="400" y="62" width="218" height="130" rx="12"/>
+      <text x="509" y="90" text-anchor="middle" font-size="19">Claude Code</text>
+      <text class="m" x="509" y="111" text-anchor="middle" font-size="15">repo + Nix dev shell</text>
+      <circle class="key" cx="424" cy="136" r="9" opacity=".5"/><path class="keyl" d="M433 136h16" opacity=".5"/>
+      <text x="458" y="141" font-size="15">FAKE API tokens only</text>
+      <text class="m" x="509" y="172" text-anchor="middle" font-size="15">talks to localhost:8080</text>
+
+      <path class="ink" d="M509 192V282"/><path class="ink" d="M499 272l10 10 10-10"/>
+      <text class="m" x="522" y="240" font-size="15">each request =</text>
+      <text class="m" x="509" y="258" font-size="15">one yamux stream</text>
+
+      <rect class="paper" x="400" y="282" width="218" height="62" rx="12"/>
+      <text x="509" y="310" text-anchor="middle" font-size="19">Go bridge</text>
+      <text class="m" x="509" y="331" text-anchor="middle" font-size="15">box side, listens on :8080</text>
+
+      <rect class="paper" x="400" y="394" width="218" height="62" rx="12"/>
+      <text x="509" y="422" text-anchor="middle" font-size="17">~/.box/status.log</text>
+      <text class="m" x="509" y="443" text-anchor="middle" font-size="15">agent writes with box-note</text>
+
+      <!-- firewall ring -->
+      <rect class="dash" x="384" y="12" width="250" height="458" rx="18"/>
+      <path class="ink" d="M509 470V516"/><path class="ink" d="M499 506l10 10 10-10"/>
+      <text class="d" x="509" y="544" text-anchor="middle" font-size="17" style="fill:#c8322d">firewall: web only (53, 80, 443)</text>
+
+      <!-- pipe -->
+      <rect class="tube" x="240" y="296" width="160" height="34" rx="17"/>
+      <circle class="badge" cx="284" cy="313" r="6"/><circle class="badge" cx="320" cy="313" r="6"/><circle class="badge" cx="356" cy="313" r="6"/>
+      <text class="d" x="320" y="278" text-anchor="middle" font-size="17">one pipe</text>
+      <text class="m" x="320" y="354" text-anchor="middle" font-size="14">yamux over orb run</text>
+      <text class="m" x="320" y="372" text-anchor="middle" font-size="14">(the Mac starts it)</text>
+
+      <!-- status path -->
+      <path class="ink" d="M384 425H256"/><path class="ink" d="M266 415l-10 10 10 10"/>
+      <text class="m" x="320" y="412" text-anchor="middle" font-size="14">orb run cat</text>
+
+    </svg>
