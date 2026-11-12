@@ -71,6 +71,7 @@ The proxy only injects the two built-in tokens for now; a new service also needs
 - An injected agent could misuse your home internet address over 80/443 (for example hammering a website).
 - "If anything is unclear or blocked, stop and ask" and the 7-day package rule in the box `CLAUDE.md` are requests, not controls.
 - `--fork` and `--repo` apply the same `protect-main` ruleset, push protection and bot invite as a new repo (skipped if already there). Forks of other people's repos start from their default branch and their PRs target your fork, not upstream.
+- `box reset` rewinds the code, not the status history. The history is append-only on the Mac, so after a reset `box status` still shows the entries from before it (for example `done` at the old commit) until the agent writes a new one.
 - Pro usage is the real cap on parallel boxes.
 - With the Mac asleep or the proxy down, Claude shows its own error and stops after about 3 minutes.
 - Claude shows "Remote managed settings failed to load (401)" in every pane: its policy call goes direct with a fake token. Harmless.
