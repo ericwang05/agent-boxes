@@ -19,9 +19,14 @@ check "merge via API refused" test "$(code PUT "/ghapi/repos/$OWNER/$NAME/pulls/
 step "straight at GitHub with the bot token (the ruleset itself)"
 tok="$(security find-generic-password -s agentbox-github -w | tr -d '[:space:]')"
 [[ ! "$tok" =~ ^([0-9a-f]{2})+$ ]] || tok="$(xxd -r -p <<<"$tok")"
-check "bot cannot merge its own unapproved PR" bash -c "! GH_TOKEN='$tok' gh api -X PUT repos/$OWNER/$NAME/pulls/$n/merge"
-check "bot cannot move main to its commit" bash -c "! GH_TOKEN='$tok' gh api -X PATCH repos/$OWNER/$NAME/git/refs/heads/main -f sha=$c1 -F force=true"
-check "bot cannot delete main" bash -c "! GH_TOKEN='$tok' gh api -X DELETE repos/$OWNER/$NAME/git/refs/heads/main"
+# The token goes through the environment of gh only, never into any command line (ps would show it).
+bot_ok() { GH_TOKEN="$tok" gh api "$@" >/dev/null 2>&1; }
+bot_fails() { ! bot_ok "$@"; }
+# Control: the same token works for a read, so a refusal below is not just a bad token.
+check "bot token is valid (can read the repo)" bot_ok "repos/$OWNER/$NAME"
+check "bot cannot merge its own unapproved PR" bot_fails -X PUT "repos/$OWNER/$NAME/pulls/$n/merge"
+check "bot cannot move main to its commit" bot_fails -X PATCH "repos/$OWNER/$NAME/git/refs/heads/main" -f sha="$c1" -F force=true
+check "bot cannot delete main" bot_fails -X DELETE "repos/$OWNER/$NAME/git/refs/heads/main"
 unset tok
 
 step "the ruleset"

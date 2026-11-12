@@ -10,6 +10,11 @@ for k in claude github; do
   t="$(security find-generic-password -s "agentbox-$k" -w 2>/dev/null | tr -d '[:space:]')"
   [ ${#t} -ge 30 ] || { echo "no usable Keychain token agentbox-$k" >&2; exit 2; }
   printf '%s\n%s\n' "$t" "${t:8:24}" >>"$pats" # the whole token and a slice, in case it is cut up
+  # The Keychain prints a token containing a newline as hex; the proxy decodes it, so search for the decoded form too.
+  if [[ "$t" =~ ^([0-9a-f]{2})+$ ]]; then
+    d="$(xxd -r -p <<<"$t" | tr -d '[:space:]')"
+    [ ${#d} -ge 30 ] && printf '%s\n%s\n' "$d" "${d:8:24}" >>"$pats" # never write an empty line: it would match everything
+  fi
 done
 
 dump_box() { # fills $dump; an empty or failed dump would pass by accident
