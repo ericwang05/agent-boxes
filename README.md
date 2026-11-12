@@ -4,15 +4,7 @@
 
 Compared with plain herdr plus Claude Code it adds four things: an isolated box, real tokens that never enter the box, a locked `main`, and reset to a saved point.
 
-```
-MAC                                              BOX (one per project, OrbStack --isolated)
-box CLI (plain bash, no AI)                      repo + Nix dev shell, Claude Code with FAKE tokens
-proxy.py per box (real tokens from Keychain)     ANTHROPIC_BASE_URL=http://localhost:8080
-   ^ unix socket per box                         git insteadOf (own repo only) -> localhost:8080
-   +---- Go bridge (yamux over orb run) -------> localhost:8080 (bridge, box side)
-herdr: one pane per box                          firewall: no Mac, no LAN, no IPv6; only ports 53, 80, 443 out
-status log copy (append-only)  <-- orb run cat -- ~/.box/status.log (agent appends with box-note)
-```
+![agent-boxes architecture: the Mac holds the proxy and real API tokens, the box holds Claude Code with fake API tokens, and one yamux pipe over orb run joins the two bridges](docs/architecture.svg)
 
 ## Commands
 
