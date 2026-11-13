@@ -5,7 +5,7 @@ End-to-end tests for agent-boxes. They use real boxes and real GitHub repos, so 
 ## Run
 
 ```
-tests/run.sh                          # everything (about 11 minutes)
+tests/run.sh                          # everything (15 tests, about 16 minutes)
 tests/run.sh chain2_panic_recover     # one test (name without .sh)
 BOX_BIN=/path/to/bin/box tests/run.sh # test a different checkout of box
 ```
