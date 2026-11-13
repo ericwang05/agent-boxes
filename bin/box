@@ -28,7 +28,7 @@ Usage: box setup
 setup    one-time: check tools, write config, add tokens to the Keychain, ssh entry, build box-base
 token    add or replace a real token NAME in the Keychain (claude: from `claude setup-token`; github: the bot's classic token)
 new      create the repo (or fork one with --fork, or attach with --repo), lock main, make the box, start its proxy and bridge, open the herdr pane
-status   one row per box from its status log; --history shows the full timeline (status/N numbers for reset)
+status   one row per box from its status log, plus the commit it has checked out now; --history shows the full timeline (status/N numbers for reset)
 reset    delete the box and rebuild it at that commit, PR head or status entry
 rm       delete the box and its proxy and bridge; the repo and status history stay
 panic    stop every box, bridge and proxy now
@@ -160,23 +160,12 @@ pull_status() { # name
     grep -qxF -- "$line" "$f" || printf '%s\n' "$line" >>"$f"
   done
 }
-# After a reset, drop log entries whose commit is not in the history of the reset commit ($1), so status/N only lists real states.
-# Writes only if every commit was checked; a network error leaves the log as it was.
-prune_status() { # sha
-  local f="$status_dir/$name.log" tmp t s c k out keep="" prev=""
-  [ -s "$f" ] || return 0
-  tmp="$f.prune"; : >"$tmp"
-  while IFS=$'\t' read -r t s c k; do
-    if [ "$c" != "$prev" ]; then
-      prev="$c"
-      if out="$(gh api "repos/$repo/compare/$c...$1" --jq .status 2>&1)"; then
-        case "$out" in ahead | identical) keep=y ;; *) keep="" ;; esac
-      elif [[ "$out" == *"HTTP 404"* ]]; then keep=""
-      else rm -f "$tmp"; echo "box: could not check status entries against GitHub, log left as is: $out" >&2; return 0; fi
-    fi
-    [ -z "$keep" ] || printf '%s\t%s\t%s\t%s\n' "$t" "$s" "$c" "$k" >>"$tmp"
-  done <"$f"
-  mv "$tmp" "$f"
+# The commit a running box has checked out now (empty if the box is not running). It can differ from the last status note,
+# for example right after a reset.
+checked_out() { # name
+  local r rn; r="$(jq -r '.repo // empty' "$reg_dir/$1.json" 2>/dev/null || true)"; rn="${r#*/}"
+  [ -n "$rn" ] || return 0
+  orb -m "$1" bash -c "cd ~/$rn && git rev-parse HEAD" 2>/dev/null </dev/null | tr -d '[:space:]' || true
 }
 if [ "$cmd" = status ]; then
   want="" hist=false
@@ -184,14 +173,24 @@ if [ "$cmd" = status ]; then
   names=$(cd "$reg_dir" 2>/dev/null && ls | sed 's/\.json$//' || true)
   [ -z "$want" ] || names="$want"
   for n in $names; do
-    orb list 2>/dev/null | awk -v n="$n" '$1 == n && $2 == "running" { f=1 } END { exit !f }' && pull_status "$n" || true
+    at=""
+    if orb list 2>/dev/null | awk -v n="$n" '$1 == n && $2 == "running" { f=1 } END { exit !f }'; then
+      pull_status "$n" || true
+      at="$(checked_out "$n")"
+    fi
     f="$status_dir/$n.log"
-    [ -s "$f" ] || { printf '%-12s %s\n' "$n" "no status yet"; continue; }
-    if $hist; then echo "== $n"; awk -F'\t' '{ printf "%3d  %s  %-9s %s  %s\n", NR, $1, $2, substr($3, 1, 7), $4 }' "$f"; continue; fi
+    if [ ! -s "$f" ]; then printf '%-12s %s%s\n' "$n" "no status yet" "${at:+  checked-out ${at:0:7}}"; continue; fi
+    if $hist; then
+      echo "== $n${at:+  (checked out: ${at:0:7})}"
+      # Mark the latest entry made at the checked-out commit.
+      awk -F'\t' -v h="$at" 'NR == FNR { if (h != "" && index(h, $3) == 1) last = FNR; next }
+        { printf "%3d  %s  %-9s %s  %s%s\n", FNR, $1, $2, substr($3, 1, 7), $4, (FNR == last ? "   <- checked out" : "") }' "$f" "$f"
+      continue
+    fi
     repo="$(jq -r '.repo // empty' "$reg_dir/$n.json" 2>/dev/null || true)"
     IFS=$'\t' read -r t s c k < <(tail -n 1 "$f")
     pr=""; [ -z "$repo" ] || pr="$(gh api "repos/$repo/commits/$c/pulls" --jq '.[0].html_url // empty' 2>/dev/null || true)"
-    printf '%-12s %-9s %-40.40s %s  %s  %s\n' "$n" "$s" "$k" "${c:0:7}" "$t" "$pr"
+    printf '%-12s %-9s %-40.40s %s  %s  %s%s\n' "$n" "$s" "$k" "${c:0:7}" "$t" "$pr" "${at:+  checked-out ${at:0:7}}"
   done
   exit
 fi
@@ -376,7 +375,6 @@ case "$cmd" in
     [ -z "$entry" ] || echo "Status entry at that commit: $entry"
     machine_remove; jobs_stop "$name"; "$sandbox" rm "$name" || echo "box: no box $name, continuing" >&2
     provision "$sha" "Reset to ${sha:0:7}.${entry:+ Last status there: $entry}"
-    prune_status "$sha"
     echo "box $name reset at ${sha:0:7}: github.com/$repo"
     exit ;;
 esac

@@ -24,4 +24,5 @@ check "repo kept" gh repo view "$OWNER/$NAME"
 check "PR kept" test "$(gh api "repos/$OWNER/$NAME/pulls/$n" --jq .state)" = open
 check "status history kept on the Mac" grep -q "pr work" "$CFG/status/$NAME.log"
 check "box status still prints the history" bash -c "'$BOX' status '$NAME' | grep -q '${c1:0:7}'"
+check "a removed box shows no checked-out commit" bash -c "! '$BOX' status '$NAME' | grep -q 'checked-out'"
 finish
