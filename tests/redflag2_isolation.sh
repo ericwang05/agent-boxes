@@ -10,8 +10,12 @@ iso() { # label
   check "$1: 10.0.0.1 blocked" box_fails 'curl -s -m 3 -o /dev/null http://10.0.0.1'
   check "$1: 172.16.0.1 blocked" box_fails 'curl -s -m 3 -o /dev/null http://172.16.0.1'
   check "$1: the Mac (host.orb.internal) blocked" box_fails 'curl -s -m 3 -o /dev/null http://host.orb.internal'
-  check "$1: github port 22 blocked" box_fails 'timeout 4 bash -c "echo > /dev/tcp/github.com/22"'
-  check "$1: github port 8443 blocked" box_fails 'timeout 4 bash -c "echo > /dev/tcp/github.com/8443"'
+  # Only ports that are open on the internet prove the firewall is what blocks them, so check from the Mac first.
+  for hp in github.com:22 smtp.gmail.com:587; do
+    h="${hp%:*}"; p="${hp#*:}"
+    if to 6 bash -c "echo > /dev/tcp/$h/$p" 2>/dev/null; then check "$1: $hp (open from the Mac) blocked" box_fails "timeout 4 bash -c 'echo > /dev/tcp/$h/$p'"
+    else skip "$1: $hp is not reachable from the Mac either"; fi
+  done
   check "$1: IPv6 blocked" box_fails 'curl -6 -s -m 4 -o /dev/null https://ipv6.google.com'
   check "$1: sudo blocked" box_fails 'sudo -n true'
   check "$1: no host mounts" box_fails 'mount | grep -qE "/Users|mnt/mac|virtiofs"'

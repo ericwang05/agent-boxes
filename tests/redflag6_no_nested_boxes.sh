@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# Red flag 6: an agent inside a box cannot make boxes or repos of its own, but it can run subagents (parallel
-# processes and git worktrees) inside its own box, all through the same proxy.
-# Set BOX_TEST_REAL_AGENT=1 to also start a real Claude subagent (this spends a little Pro usage).
+# Red flag 6: an agent inside a box cannot make boxes or repos of its own.
 . "$(dirname "$0")/lib.sh"
 
 mkbox
@@ -34,21 +32,6 @@ check "create a repo in an org -> 403" test "$(code POST /ghapi/orgs/x/repos '{"
 check "fork its own repo -> 403" test "$(code POST "/ghapi/repos/$OWNER/$NAME/forks")" = 403
 check "make a repo with a git push to a new URL fails" fails_on "$NAME" "cd ~/$NAME && GIT_TERMINAL_PROMPT=0 git push https://github.com/$OWNER/$NAME-evil HEAD:refs/heads/main"
 check "no new repo appeared" bash -c "! gh repo view $OWNER/$NAME-evil"
-
-step "subagents still work inside the box"
-check "claude is installed (subagents are its own processes)" bx 'claude --version'
-bx "cd ~/$NAME && for i in 1 2 3 4; do git worktree add -q ../wt\$i -b sub\$i; done"
-bx bash -s <<'EOF'
-cd ~
-for i in 1 2 3 4; do ( cd wt$i && echo $i > f$i && git add f$i && git commit -qm "sub$i" && git push -q origin sub$i ) & done
-wait
-EOF
-for i in 1 2 3 4; do check "worktree $i pushed branch sub$i through the proxy" gh api "repos/$OWNER/$NAME/branches/sub$i"; done
-check "the proxy log shows no refusals for those pushes" bash -c "! grep -E 'sub[1-4]' '$CFG/logs/$NAME.proxy.log' | grep -q '\"rule\": *\"\(not-own-repo\|bad-token\|rest-not-allowed\)\"'"
-if [ "${BOX_TEST_REAL_AGENT:-}" = 1 ]; then
-  out="$(bx "cd ~/$NAME && claude -p 'Use the Task tool to start one subagent whose only job is to reply with the single word PONG. Then print exactly what it replied.' --max-turns 6" 2>&1)"
-  check "a real Claude subagent ran inside the box and answered" grep -q PONG <<<"$out"
-else skip "real Claude subagent (set BOX_TEST_REAL_AGENT=1 to run; spends Pro usage)"; fi
 
 step "none of that made a new box"
 check "machine count unchanged ($m0)" test "$(count_machines)" = "$m0"

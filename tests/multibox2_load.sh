@@ -32,16 +32,18 @@ check "B got 20 answers, all for B's repo" test "$(norm "$t/ab")" = "20 $B"
 
 step "A holds 120 connections open (its cap is 64 streams); B must not notice"
 pidA="$(pgrep -f "agentbox-bridge mac-side -box $A" | head -1)"
-bxo "$A" bash -s >/dev/null 2>&1 <<'EOF' &
-for i in $(seq 120); do ( exec 3<>/dev/tcp/127.0.0.1/8080; sleep 25 ) & done
+bxo "$A" bash -s >/dev/null 2>&1 <<'EOF2' &
+for i in $(seq 120); do ( exec 3<>/dev/tcp/127.0.0.1/8080; sleep 40 ) & done
 wait
-EOF
+EOF2
 holder=$!
-sleep 6
+# Prove the load really reached the cap: the bridge counts the most streams open at once and how many it turned away.
+cap_hit() { local f="$CFG/logs/status/$A.json"; [ "$(jq -r '.peak // 0' "$f" 2>/dev/null)" -ge 64 ] && [ "$(jq -r '.rejected_by.max_streams // 0' "$f" 2>/dev/null)" -ge 1 ]; }
+wait_cap() { local i; for i in $(seq 25); do cap_hit && return 0; sleep 1; done; return 1; }
+check "A hit its cap: peak open streams >= 64 and some rejected for max_streams" wait_cap
 health_burst "$B" >"$t/hb2"
 check "B: all 50 health checks still 200 while A is saturated" test "$(norm "$t/hb2")" = "50 200"
 check "B's bridge is up" bridge_up_of "$B"
-if bridge_up_of "$A"; then echo "  info A still answers while holding 120 connections"; else echo "  info A refuses new requests while saturated (expected: its cap)"; fi
 wait "$holder" 2>/dev/null
 check "A recovers within 45s of the connections closing" wait_bridge_up "$A" 45
 pidA2="$(pgrep -f "agentbox-bridge mac-side -box $A" | head -1)"

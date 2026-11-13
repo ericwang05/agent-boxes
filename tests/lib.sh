@@ -35,6 +35,7 @@ bridge_up() { [ "$(bx 'curl -s -m 5 -o /dev/null -w %{http_code} http://localhos
 # Boxes other than box-base and this test's own.
 other_running() { "$SANDBOX" ls | awk -v n="$NAME" '$2 == "running" && $1 != "box-base" && $1 != n { print $1 }'; }
 
+to() { perl -e 'alarm shift; exec @ARGV' "$@"; } # timeout for Mac-side commands (macOS has no `timeout`)
 skip() { echo "  skip $*"; }
 bxo() { local n="$1"; shift; "$SANDBOX" exec "$n" "$@"; } # exec in any box
 fails_on() { local n="$1"; shift; ! bxo "$n" "$@" >/dev/null 2>&1; }

@@ -10,12 +10,22 @@ check "A's bridge is up" bridge_up_of "$A"
 check "B's bridge is up" bridge_up_of "$B"
 check "control: A can open a TCP connection to github.com:443" bxo "$A" 'timeout 4 bash -c "echo > /dev/tcp/github.com/443"'
 
-step "network: neither box can reach the other (any of these ports)"
-for port in 22 80 443 8080 32222 5000; do
+step "network: neither box can reach the other"
+# A closed port also refuses connections, so first put a real listener on every port and prove it answers on its own
+# box. The box has no nc or python, so a root-started `git daemon` is the listener (the harness is root; the agent is not).
+ports="22 80 443 5000 32222"
+listen_on() { to 40 orb -m "$1" -u root bash -c "for p in $ports; do setsid nohup git daemon --reuseaddr --listen=0.0.0.0 --port=\$p --base-path=/tmp >/dev/null 2>&1 </dev/null & done; sleep 1" >/dev/null 2>&1; }
+listen_on "$A"; listen_on "$B"
+for port in $ports; do
+  check "control: B:$port answers on B's own address" bxo "$B" "timeout 3 bash -c 'echo > /dev/tcp/$ipB/$port'"
+  check "control: A:$port answers on A's own address" bxo "$A" "timeout 3 bash -c 'echo > /dev/tcp/$ipA/$port'"
   check "A -> B:$port blocked" fails_on "$A" "timeout 4 bash -c 'echo > /dev/tcp/$ipB/$port'"
   check "B -> A:$port blocked" fails_on "$B" "timeout 4 bash -c 'echo > /dev/tcp/$ipA/$port'"
 done
-check "A -> B http blocked" fails_on "$A" "curl -s -m 3 -o /dev/null http://$ipB"
+# 8080 is the bridge's own port: it must listen on loopback only (a listener on another address is not possible there).
+only_loopback='test "$(ss -ltnH | awk '"'"'$4 ~ /:8080$/ { print $4 }'"'"')" = 127.0.0.1:8080'
+check "B's bridge port 8080 listens on loopback only" bxo "$B" "$only_loopback"
+check "A's bridge port 8080 listens on loopback only" bxo "$A" "$only_loopback"
 
 step "proxy: A's proxy serves only A"
 fakeA="$(bxo "$A" '. ~/.box-env; echo $GH_TOKEN' | tr -d '[:space:]')"
