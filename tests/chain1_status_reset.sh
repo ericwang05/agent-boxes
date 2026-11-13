@@ -29,6 +29,7 @@ check "no tracked file modified or deleted" bx "cd ~/$NAME && test -z \"\$(git d
 check "bridge up" bridge_up
 # The entry for the reset commit stays. Entries after it are dropped by newer boxes (reset prunes them) and kept by older ones.
 check "Mac status log still has the entry for ${c1:0:7}" grep -q "${c1:0:7}" "$CFG/status/$NAME.log"
+echo "  info status log has $(wc -l <"$CFG/status/$NAME.log" | tr -d ' ') entries after the reset (2 = old box, 1 = box that prunes)"
 
 step "reset --to full commit c2"
 "$BOX" reset "$NAME" --to "$c2" || bad "reset c2"
