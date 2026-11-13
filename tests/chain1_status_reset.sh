@@ -27,8 +27,8 @@ check "HEAD is c1" test "$(head_sha)" = "$c1"
 check "one.txt present, two.txt gone" bx "cd ~/$NAME && test -e one.txt && test ! -e two.txt"
 check "no tracked file modified or deleted" bx "cd ~/$NAME && test -z \"\$(git diff HEAD --name-only --diff-filter=MD)\""
 check "bridge up" bridge_up
-# Known side effect (README): the Mac keeps the old history, so it still has both entries.
-check "Mac status history unchanged (2 entries)" test "$(wc -l <"$CFG/status/$NAME.log" | tr -d ' ')" = 2
+# The entry for the reset commit stays. Entries after it are dropped by newer boxes (reset prunes them) and kept by older ones.
+check "Mac status log still has the entry for ${c1:0:7}" grep -q "${c1:0:7}" "$CFG/status/$NAME.log"
 
 step "reset --to full commit c2"
 "$BOX" reset "$NAME" --to "$c2" || bad "reset c2"

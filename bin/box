@@ -160,6 +160,24 @@ pull_status() { # name
     grep -qxF -- "$line" "$f" || printf '%s\n' "$line" >>"$f"
   done
 }
+# After a reset, drop log entries whose commit is not in the history of the reset commit ($1), so status/N only lists real states.
+# Writes only if every commit was checked; a network error leaves the log as it was.
+prune_status() { # sha
+  local f="$status_dir/$name.log" tmp t s c k out keep="" prev=""
+  [ -s "$f" ] || return 0
+  tmp="$f.prune"; : >"$tmp"
+  while IFS=$'\t' read -r t s c k; do
+    if [ "$c" != "$prev" ]; then
+      prev="$c"
+      if out="$(gh api "repos/$repo/compare/$c...$1" --jq .status 2>&1)"; then
+        case "$out" in ahead | identical) keep=y ;; *) keep="" ;; esac
+      elif [[ "$out" == *"HTTP 404"* ]]; then keep=""
+      else rm -f "$tmp"; echo "box: could not check status entries against GitHub, log left as is: $out" >&2; return 0; fi
+    fi
+    [ -z "$keep" ] || printf '%s\t%s\t%s\t%s\n' "$t" "$s" "$c" "$k" >>"$tmp"
+  done <"$f"
+  mv "$tmp" "$f"
+}
 if [ "$cmd" = status ]; then
   want="" hist=false
   for a in "$@"; do case "$a" in --history) hist=true ;; -*) die "unknown argument: $a" ;; *) want="$a" ;; esac; done
@@ -358,6 +376,7 @@ case "$cmd" in
     [ -z "$entry" ] || echo "Status entry at that commit: $entry"
     machine_remove; jobs_stop "$name"; "$sandbox" rm "$name" || echo "box: no box $name, continuing" >&2
     provision "$sha" "Reset to ${sha:0:7}.${entry:+ Last status there: $entry}"
+    prune_status "$sha"
     echo "box $name reset at ${sha:0:7}: github.com/$repo"
     exit ;;
 esac
