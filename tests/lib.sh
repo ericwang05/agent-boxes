@@ -13,6 +13,7 @@ CFG="${BOX_CONFIG_DIR:-$HOME/.config/agent-boxes}"
 . "$CFG/config" # OWNER
 LA="$HOME/Library/LaunchAgents"
 NAME="boxtest-$(date +%m%d%H%M%S)-$$"
+NAME2="boxtest-b${NAME#boxtest-}" # a second box; its name is not a prefix-extension of NAME, so globs and greps stay exact
 REPO_NAME="$NAME" # the repo's name; differs from the box name only with --repo
 EXTRA_REPO=""     # a second repo (owner/name) the test made; cleanup deletes it if it is a boxtest- name
 fails=0
@@ -34,6 +35,14 @@ bridge_up() { [ "$(bx 'curl -s -m 5 -o /dev/null -w %{http_code} http://localhos
 # Boxes other than box-base and this test's own.
 other_running() { "$SANDBOX" ls | awk -v n="$NAME" '$2 == "running" && $1 != "box-base" && $1 != n { print $1 }'; }
 
+to() { perl -e 'alarm shift; exec @ARGV' "$@"; } # timeout for Mac-side commands (macOS has no `timeout`)
+skip() { echo "  skip $*"; }
+bxo() { local n="$1"; shift; "$SANDBOX" exec "$n" "$@"; } # exec in any box
+fails_on() { local n="$1"; shift; ! bxo "$n" "$@" >/dev/null 2>&1; }
+ip_of() { "$SANDBOX" ls | awk -v n="$1" '$1 == n && $2 == "running" { print $NF }'; }
+bridge_up_of() { [ "$(bxo "$1" 'curl -s -m 5 -o /dev/null -w %{http_code} http://localhost:8080/__health' 2>/dev/null)" = 200 ]; }
+wait_bridge_up() { local i; for i in $(seq "${2:-45}"); do bridge_up_of "$1" && return 0; sleep 1; done; return 1; } # name [seconds]
+mkbox2() { step "new $NAME2"; "$BOX" new "$NAME2" || { bad "box new $NAME2"; finish; }; }
 box_fails() { ! bx "$@" >/dev/null 2>&1; }
 no_herdr_machine() { herdr machine list --json | jq -e --arg l "$NAME" '[.. | objects | select(.label? == $l)] | length == 0' >/dev/null; }
 no_procs() { ! pgrep -f "proxy.py --box $NAME" >/dev/null && ! pgrep -f "agentbox-bridge mac-side -box $NAME" >/dev/null; }
@@ -59,10 +68,13 @@ open_pr() { # branch -> PR number
 mkbox() { step "new $NAME"; "$BOX" new "$NAME" "$@" || { bad "box new"; finish; }; }
 
 cleanup() {
-  guard "$NAME"
+  guard "$NAME"; guard "$NAME2"
   step "cleanup $NAME"
   "$BOX" rm "$NAME" >/dev/null 2>&1
+  "$BOX" rm "$NAME2" >/dev/null 2>&1
   gh repo delete "$OWNER/$NAME" --yes >/dev/null 2>&1
+  gh repo delete "$OWNER/$NAME2" --yes >/dev/null 2>&1
+  rm -f "$CFG/box-repos/$NAME2.json" "$CFG/status/$NAME2.log"
   if [ -n "$EXTRA_REPO" ]; then guard "${EXTRA_REPO#*/}"; gh repo delete "$EXTRA_REPO" --yes >/dev/null 2>&1; fi
   rm -f "$CFG/box-repos/$NAME.json" "$CFG/status/$NAME.log"
 }

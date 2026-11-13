@@ -41,7 +41,7 @@ Apple Silicon Macs only.
 | Command | Does |
 |---|---|
 | `box new NAME [--repo owner/name \| --fork owner/name]` | Create the repo, fork one into your account, or attach one of yours; lock main, make the box, start its proxy and bridge, open the herdr pane |
-| `box status [NAME] [--history]` | One row per box: state, last task, commit, PR link, time. `--history` numbers every entry (`status/N`) |
+| `box status [NAME] [--history]` | One row per box: state, last task, commit, PR link, time, and the commit the box has checked out now (`checked-out`). `--history` numbers every entry (`status/N`) and marks the one at the checked-out commit |
 | `box reset NAME --to <commit\|pr/N\|status/N>` | Delete the box and rebuild it at that commit. Packages come back through `flake.lock` |
 | `box rm NAME` | Delete the box, its proxy and bridge. The repo and status history stay |
 | `box panic` | Stop every box, bridge and proxy now |
@@ -71,6 +71,7 @@ The proxy only injects the two built-in tokens for now; a new service also needs
 - An injected agent could misuse your home internet address over 80/443 (for example hammering a website).
 - "If anything is unclear or blocked, stop and ask" and the 7-day package rule in the box `CLAUDE.md` are requests, not controls.
 - `--fork` and `--repo` apply the same `protect-main` ruleset, push protection and bot invite as a new repo (skipped if already there). Forks of other people's repos start from their default branch and their PRs target your fork, not upstream.
+- `box reset` rewinds the code, not the status log. The log is append-only, so after a reset the last entry can be from a later commit than the one checked out. `box status` shows the checked-out commit so you can tell, and `status/N` still lets you go forward again.
 - Pro usage is the real cap on parallel boxes.
 - With the Mac asleep or the proxy down, Claude shows its own error and stops after about 3 minutes.
 - Claude shows "Remote managed settings failed to load (401)" in every pane: its policy call goes direct with a fake token. Harmless.
@@ -94,6 +95,7 @@ The proxy only injects the two built-in tokens for now; a new service also needs
 ### Layout
 
 - `bin/box` the CLI. `box/sandbox` makes boxes; `box/setup.sh` builds the base; `box/firewall.nft`, `box/managed-settings.json`, `box/box-note` are installed into every box; `box/claude/` is the agent's `~/.claude` (CLAUDE.md, plugins).
+- `tests/` end-to-end tests that run against real boxes (see `tests/README.md`; `tests/run.sh`, about 16 minutes).
 - `proxy/proxy.py` the per-box proxy (Python stdlib, one file). `bridge/` the Go bridge (frozen; built into `build/` by `box base`).
 - Mac state in `~/.config/agent-boxes/`: `config`, `box-repos/` (box to repo), `run/` (sockets, mode 700), `logs/` (JSON lines from the proxy; no header values), `status/` (append-only copies of each box's status log).
 - launchd jobs `dev.agent-boxes.<box>-proxy` and `-bridge` in `~/Library/LaunchAgents`, written by `box new`, removed by `box rm` and `box panic`.
